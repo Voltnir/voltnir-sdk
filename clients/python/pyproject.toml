@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voltnir-grpc-py-sdk"
+version = "2.0.0"
+description = "Python SDK for the Voltnir external gRPC API (voltnir.api.v1)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Voltnir" }]
+keywords = ["voltnir", "grpc", "epex", "m7", "trading", "energy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = [
+    "grpcio>=1.80",
+    # Upper bound is real: protobuf guarantees gencode compatibility only
+    # across one major version (N+1), so a protobuf 8 release would break the
+    # vendored stubs. Floor stays a floor, as a library's must.
+    "protobuf>=6.33,<8",
+]
+
+[project.optional-dependencies]
+# Full static checking needs stubs for protobuf itself, which does NOT ship
+# py.typed. Without them mypy treats every generated message as Any, so a
+# typo'd response field passes silently. Ours are generated (--pyi_out) and
+# shipped; this extra supplies the rest.
+typing = [
+    "types-protobuf",
+]
+dev = [
+    # PINNED, not a floor. The committed stubs in src/voltnir_sdk/_generated/
+    # embed their generator's version (the protobuf gencode header in *_pb2.py,
+    # GRPC_GENERATED_VERSION in *_pb2_grpc.py), so regenerating with a different
+    # grpcio-tools rewrites those files wholesale. That cosmetic churn buries any
+    # real contract change in the diff and makes "are the stubs stale?"
+    # unanswerable by inspection. scripts/generate.sh enforces this exact version.
+    # Bumping it is deliberate: change it here, re-run generate.sh, and commit the
+    # regenerated stubs in the same change.
+    "grpcio-tools==1.80.0",
+    # PINNED for a DIFFERENT reason than grpcio-tools above, so don't merge the
+    # two rationales. protobuf here is the RUNTIME, not the generator: it does
+    # not affect the generated stub bytes at all (the gencode version baked into
+    # *_pb2.py comes from grpcio-tools, and regenerating under a newer protobuf
+    # leaves those files byte-identical). It is pinned so test runs are
+    # reproducible, because protobuf's runtime type checking tightens between
+    # releases and that changes which malformed calls raise.
+    # Must stay >= the `protobuf` floor in [project] dependencies, or a dev
+    # install conflicts with the package's own runtime requirement.
+    "protobuf==6.33.6",
+    "types-protobuf",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voltnir_sdk"]
+
+# NOTE: hatchling always includes .gitignore in an sdist; an `exclude` for it
+# is silently ineffective, so there is deliberately none here rather than
+# config that looks like it does something.
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/scripts", "/tests", "/verify.py", "/README.md", "/LICENSE", "/CHANGELOG.md", "/pyproject.toml"]

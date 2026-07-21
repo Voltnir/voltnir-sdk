@@ -1,0 +1,27 @@
+# Python build / cache artifacts (the SDK's own .gitignore covers clients/python/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.whl
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Venvs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Internal mirror tooling, not for the public repo. Kept on disk for the
+# operator, never published. See the private source for how the mirror is built.
+/sync.sh
+/html_to_md.py

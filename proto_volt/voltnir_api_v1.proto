@@ -1,0 +1,1539 @@
+// Voltnir external API: Protocol Buffers / gRPC schema, v1.
+//
+// This file is the canonical description of the gRPC surface. It mirrors the
+// REST API at docs/rest_api_v1.html one-to-one for unary calls and adds
+// streaming RPCs that have no REST equivalent (Watch* and streaming
+// Export*). Every field and RPC below has a REST-side counterpart or an
+// explicit note that it is gRPC-only.
+//
+// Numeric conventions mirror the REST API exactly. All fixed-point
+// integers:
+//   - price:        sint64  (CCY/MWh × 100; may be negative on power markets)
+//   - quantity:     uint32  (sub-MW = MWh × 1000)
+//   - display_qty:  uint32  (sub-MW)
+//   - contract_id:  int64   (M7 numeric ID)
+//   - timestamps:   int64   (Unix ms UTC; 0 == absent for nullable fields)
+//
+// proto3 has no nullable scalars, so "0" / "" act as absent sentinels where
+// noted inline. The handful of cases where a 0 value is legitimately
+// meaningful use google.protobuf.Int64Value / UInt32Value instead.
+
+syntax = "proto3";
+
+package voltnir.api.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+
+// ---------------------------------------------------------------------------
+// Enums: every M7 or Voltnir lifecycle value that crosses the wire.
+// ---------------------------------------------------------------------------
+
+// Buy or sell direction on an order.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  BUY = 1;
+  SELL = 2;
+}
+
+// Self-trade (cross-trade) prevention policy. EPEX M7 does not prevent
+// self-trades; this is a Voltnir-side pre-trade check. Runtime-mutable via
+// Set/GetSelfTradePolicy. UNSPECIFIED is treated as OBSERVE.
+enum SelfTradePolicy {
+  SELF_TRADE_POLICY_UNSPECIFIED = 0;
+  SELF_TRADE_POLICY_OBSERVE = 1;  // detect + log, allow the order through
+  SELF_TRADE_POLICY_REJECT = 2;   // block the self-crossing aggressor
+}
+
+// Lifecycle state of an own order.
+enum OrderState {
+  ORDER_STATE_UNSPECIFIED = 0;
+  PENDING = 1;     // submitted locally, not yet acknowledged by M7
+  ACTIVE = 2;      // on the book and matching
+  INACTIVE = 3;    // fully filled / cancelled / expired; no longer on book
+  HIBERNATED = 4;  // resting outside active hours; counts toward position
+  REJECTED = 5;    // rejected by M7 or local pre-check (err_resp)
+  UNKNOWN = 6;     // proto value outside the known range
+}
+
+// Order type / instruction. Maps to M7 ORDER_TYPE_* wire codes.
+//
+// Roles: REGULAR, BLOCK, ICEBERG, BALANCE, PRE_ARRANGED, and
+// EXCHANGE_PRE_ARRANGED are accepted on SubmitOrder. STOP, PRIVATE, and
+// UNKNOWN_TYPE are OUTPUT-ONLY (read from the M7 feed; rejected with
+// INVALID_ARGUMENT on submit). PRE_ARRANGED is INPUT-ONLY: the domain
+// stores a single pre-arranged kind, so a submitted PRE_ARRANGED order
+// always reads back as EXCHANGE_PRE_ARRANGED.
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  REGULAR = 1;
+  BLOCK = 2;
+  ICEBERG = 3;
+  BALANCE = 4;
+  PRE_ARRANGED = 5;
+  EXCHANGE_PRE_ARRANGED = 6;
+  PRIVATE = 7;
+  STOP = 8;
+  UNKNOWN_TYPE = 9;
+}
+
+// Execution restriction: at most how much of the order may be filled.
+// FOK and IOC require validity_res == VALIDITY_NON on SubmitOrder; the
+// GFS default (or GTD) combined with FOK/IOC is INVALID_ARGUMENT.
+enum ExeRestriction {
+  EXE_UNSPECIFIED = 0;
+  NON = 1;  // no restriction
+  FOK = 2;  // fill-or-kill
+  IOC = 3;  // immediate-or-cancel
+  AON = 4;  // all-or-none
+}
+
+// Validity specification for an order's lifetime.
+enum ValidityRes {
+  VALIDITY_UNSPECIFIED = 0;
+  GFS = 1;           // good-for-session
+  GTD = 2;           // good-till-date
+  VALIDITY_NON = 3;  // no explicit validity
+}
+
+// Action verb for the ModifyOrder RPC.
+// MODIFY_UNSPECIFIED (an unset field) is treated as MODIFY by the server,
+// so always set the action explicitly.
+enum ModifyAction {
+  MODIFY_UNSPECIFIED = 0;
+  MODIFY = 1;
+  ACTIVATE = 2;
+  DEACTIVATE = 3;
+}
+
+// M7 contract lifecycle state.
+enum ContractState {
+  CONTRACT_STATE_UNSPECIFIED = 0;
+  ACTI = 1;  // active, tradable
+  SUSP = 2;  // suspended
+  CLOS = 3;  // closed, no further trading
+}
+
+// Export format for ExportOrders / ExportTrades.
+enum ExportFormat {
+  FORMAT_UNSPECIFIED = 0;
+  JSON = 1;
+  CSV = 2;
+  reserved 3;
+  reserved "XML"; // XML export withdrawn; schema unvalidated against the TSO XSD.
+}
+
+// Identifies which fallback branch produced a contract's mark price for
+// PnL.
+enum MarkSource {
+  MARK_SOURCE_UNSPECIFIED = 0;
+  MARK_SOURCE_MID = 1;   // mid = (best_bid + best_ask) / 2
+  MARK_SOURCE_LAST = 2;  // last trade price
+  MARK_SOURCE_NONE = 3;  // no mark available; uPnL == 0
+}
+
+// ---------------------------------------------------------------------------
+// Shared messages: building blocks used by multiple RPCs.
+// ---------------------------------------------------------------------------
+
+// A confirmed own order. Mirrors the JSON
+// shape returned by REST `GET /order` and `GET /orders`.
+message OwnOrder {
+  int64 order_id = 1;                  // M7 order id
+  int64 initial_order_id = 2;          // id assigned on first placement; stable across modifies
+  int64 parent_order_id = 3;           // 0 == absent; set on a re-created order (modify)
+  uint32 revision = 4;                 // M7 monotonic revision counter
+  string account_id = 5;
+  int64 contract_id = 6;
+  string delivery_area = 7;            // EIC code
+  Side side = 8;
+  sint64 price = 9;                    // M7 price units (EUR/MWh × 100)
+  uint32 quantity = 10;                // sub-MW remaining
+  uint32 initial_quantity = 11;        // sub-MW at entry
+  uint32 hidden_quantity = 12;         // 0 == absent (iceberg reserve)
+  uint32 displayed_quantity = 13;      // 0 == absent (iceberg peak)
+  OrderType order_type = 14;
+  OrderState state = 15;
+  string action = 16;                  // M7 action code (AADD, AMOD, ADEL, ...)
+  string client_order_id = 17;
+  string user_code = 18;
+  bool pre_arranged = 19;
+  int64 timestamp_ms = 20;             // entry time, Unix ms UTC
+  int64 validity_time_ms = 21;         // GTD expiry; 0 == session-only
+  int64 last_update_time_ms = 22;      // 0 == never updated
+  string text = 23;                    // rejection reason when state==REJECTED
+  // M7 numeric basket id; 0 == standalone (not in a basket). Matches the
+  // REST `basket_id` (u64 | null); same numeric value on both surfaces.
+  uint64 basket_id = 24;
+  // Voltnir virtual-member short id recovered from `text` (vm=VM…); "" ==
+  // default member. Mirrors PendingOrder.v_member_short_id so an acknowledged
+  // order stays attributable to its member.
+  string v_member_short_id = 25;
+}
+
+// An order that has been locally submitted but not yet acknowledged by M7.
+message PendingOrder {
+  string client_order_id = 1;
+  int64 contract_id = 2;
+  string delivery_area = 3;
+  Side side = 4;
+  sint64 price = 5;
+  uint32 quantity = 6;
+  int64 entry_ts_ms = 7;
+  string v_member_short_id = 8;        // "" == default member for the caller
+}
+
+// One order row on one side of the book (returned inside Contract). The
+// source is M7's per-order Shared Order Book rows, not aggregated price
+// levels: multiple rows can share a price. Mirrors the REST `buy`/`sell`
+// row shape field-for-field.
+message ObEntry {
+  sint64 price = 1;
+  uint32 quantity = 2;
+  // M7 order id of the resting order.
+  uint64 order_id = 3;
+  // RFC 3339 timestamp of when the order entered the book; "" == not
+  // provided by the feed.
+  string order_entry_time = 4;
+  // M7 order-book execution restriction (DFS180 PblcOrdrBooksResp):
+  // 0 = unspecified, 1 = not restricted, 2 = AON (all-or-none).
+  sint32 order_execution_restriction = 5;
+  // M7 order-book order type, NOT the order-entry OrderType enum above:
+  // 0 = unspecified, 1 = regular limit, 2 = block, 3 = balance,
+  // 4 = not provided by the Shared Order Book (XBID).
+  sint32 order_type = 6;
+}
+
+// An own trade. Returned inside
+// ContractDetail.trades. (QueryAuditTrades returns JSON-string
+// AuditTradeItem rows, not this message.)
+message OwnTrade {
+  string trade_id = 1;
+  int64 contract_id = 2;
+  int64 qty = 3;                       // sub-MW
+  int64 px = 4;                        // M7 price units
+  string exec_time = 5;                // RFC 3339
+  int64 revision_no = 6;
+  string state = 7;                    // M7 trade state: ACTI, CNCL, RREQ, RGRA, RREJ, CREQ, CREJ, RSFA
+  bool pre_arranged = 8;
+  string v_member_short_id = 9;        // "" if untagged
+  repeated TradeDetail buy = 10;
+  repeated TradeDetail sell = 11;
+}
+
+// One leg of an OwnTrade (buy- or sell-side detail).
+message TradeDetail {
+  int64 order_id = 1;
+  string client_order_id = 2;
+  string delivery_area = 3;
+  string account_id = 4;
+  string user_code = 5;
+}
+
+// A contract with its current order book and metadata. Produced by
+// ListContracts, GetContract, GetContractByDelivery, WatchContract.
+message Contract {
+  string contract_id = 1;
+  string area_id = 2;
+  string prod = 3;                     // product code (e.g. "H", "QH")
+  string name = 4;
+  string long_name = 5;
+  string dlvry_start = 6;              // RFC 3339
+  string dlvry_end = 7;                // RFC 3339
+  bool predefined = 8;
+  uint32 revision_no = 9;
+  uint32 revision_ob = 10;             // 0 == no order-book revision yet
+  ContractState state = 11;
+  string trading_phase = 12;
+  string trading_phase_start = 13;
+  string trading_phase_end = 14;
+  string duration = 15;                // decimal hours as sent by M7: "0.25", "0.5", "1.0", "2.0"; "" until metadata arrives
+  // 0 on the following numeric fields means "not yet populated".
+  sint64 last_price = 16;
+  uint32 last_quantity = 17;
+  string last_trade_time = 18;         // RFC 3339; "" if no trades
+  sint64 highest_price = 19;
+  sint64 lowest_price = 20;
+  sint32 price_direction = 21;         // 1 up, -1 down, 0 unchanged
+  sint64 best_bid = 22;
+  uint32 best_bid_qty = 23;            // 0 == no bids on the book
+  sint64 best_ask = 24;
+  uint32 best_ask_qty = 25;            // 0 == no asks on the book
+  repeated ObEntry buy = 26;           // sorted: highest price first
+  repeated ObEntry sell = 27;          // sorted: lowest price first
+  // Raw M7 4-char contract state, passed through verbatim (e.g. "ACTI",
+  // "SUSP", "CLOS", or any code M7 introduces). The `state` enum above
+  // maps only the three known codes and degrades everything else to
+  // CONTRACT_STATE_UNSPECIFIED. When it reads UNSPECIFIED, consult this
+  // field. Mirrors the REST `state` string exactly. "" == state not yet
+  // received from M7.
+  string state_raw = 28;
+}
+
+// Combined view for GetContract / GetContractByDelivery: contract plus the
+// caller's orders, trades, and net position on it.
+//
+// orders_acknowledged holds M7-acknowledged orders (state ACTIVE / HIBERNATED /
+// INACTIVE), each with an assigned order_id. orders_pending holds orders the
+// gateway has submitted but M7 has not yet acknowledged; they have no
+// order_id or state yet and are NOT included in orders_acknowledged. A client
+// deciding whether it already has an order working on this contract must
+// consider BOTH lists. net_pos counts executed trades only (see the field note).
+message ContractDetail {
+  Contract contract = 1;
+  repeated OwnOrder orders_acknowledged = 2;
+  repeated OwnTrade trades = 3;
+  sint32 net_pos = 4;                  // sub-MW; + long, - short
+  repeated PendingOrder orders_pending = 5;
+}
+
+// A Voltnir virtual member (M7 trading sub-account).
+message Member {
+  string id = 1;
+  string short_id = 2;
+  string name = 3;
+  sint64 max_position = 4;             // sub-MW
+  bool active = 5;
+  sint64 cash_limit = 6;              // EUR cents; 0 = no override (global applies)
+  sint64 cash_limit_gbp = 7;         // GBP cents; separate-pool mode; 0 = no override
+  // Live cash usage (read-only projection; in each pool's cents). `consumed` is
+  // the member's open-order + executed-trade exposure; `limit` is the EFFECTIVE
+  // enforced cap (the override above capped at the global limit, or the
+  // inherited global when there is no override); `remaining = limit − consumed`
+  // (negative when over). A `*_limit` of 0 means that pool is not enforced.
+  sint64 eur_consumed_cents = 8;
+  sint64 eur_limit_cents = 9;
+  sint64 eur_remaining_cents = 10;
+  sint64 gbp_consumed_cents = 11;
+  sint64 gbp_limit_cents = 12;
+  sint64 gbp_remaining_cents = 13;
+}
+
+// A Voltnir user (maps to an API key + permission set).
+message UserProfile {
+  string id = 1;
+  string username = 2;
+  repeated string permissions = 3;     // permission codes
+  string short_id = 4;                 // compact handle (U001) used in audit attribution
+}
+
+// ---------------------------------------------------------------------------
+// Unary RPCs: request/response messages. Grouped to mirror REST modules.
+// ---------------------------------------------------------------------------
+
+// ---- Orders -----------------------------------------------------------------
+
+// POST /order: submit a new order. Requires create_order.
+//
+// Contract identification: supply `contract_id`, OR leave it 0 and supply
+// both `product` and `delivery_start`, and the server will resolve the
+// contract by product + delivery start. Matches the REST create-order shape.
+message SubmitOrderRequest {
+  Side side = 1;
+  // Price in cents (CCY/MWh × 100). May be negative on power markets.
+  sint64 price = 2;
+  // Quantity in sub-MW (MW × 1000). Must be > 0.
+  uint32 quantity = 3;
+  // EIC delivery area code. Max 64 chars.
+  string delivery_area_id = 4;
+  // Either set this directly, or leave as 0 and set product + delivery_start.
+  int64 contract_id = 5;
+  OrderType order_type = 6;
+  ExeRestriction exe_restriction = 7;
+  ValidityRes validity_res = 8;
+  // "ACTI" (default, exposed to market) or "HIBE" (hibernated).
+  string entry_state = 9;
+  // Sub-MW. Required for iceberg orders; must be < quantity. 0 == absent.
+  uint32 display_qty = 10;
+  // RFC 3339 expiry. Required when validity_res is GTD; "" otherwise.
+  string validity_date = 11;
+  // Counterpart account. Required when order_type is PRE_ARRANGED; "" otherwise.
+  string pre_arranged_acct = 12;
+  // Virtual member short_id (e.g. "VM001"); "" == default member for caller.
+  string v_member_short_id = 13;
+  // Alternate contract-identification path when contract_id = 0.
+  string product = 14;
+  // RFC 3339; matches the contract-info format exactly (e.g. "2026-04-16T22:00:00Z").
+  string delivery_start = 15;
+  // Optional client-supplied idempotency key. Must be a valid UUID; "" == the
+  // gateway generates one. Supply your own to reconcile across a disconnect
+  // (a reused key for a still-live order is rejected).
+  string client_order_id = 16;
+}
+
+// Mirrors the REST create-order response.
+// `state` is the post-ack order state; `reason` carries the M7 rejection
+// text when state == REJECTED, otherwise "".
+message SubmitOrderResponse {
+  string client_order_id = 1;
+  OrderState state = 2;
+  string reason = 3;
+}
+
+// PUT /order: modify / activate / deactivate an order. Requires
+// modify_order. Uses `client_order_id` as the handle for
+// parity with REST (which also looks up by coid and never exposes the
+// mutable M7 order_id to callers).
+message ModifyOrderRequest {
+  string client_order_id = 1;
+  ModifyAction action = 2;
+  // Price in cents. Required when action == MODIFY, ignored otherwise.
+  google.protobuf.Int64Value price = 3;
+  // Sub-MW. Required when action == MODIFY, ignored otherwise.
+  google.protobuf.UInt32Value quantity = 4;
+  // Sub-MW. Optional for iceberg modifies. 0 == absent.
+  uint32 display_qty = 5;
+  ValidityRes validity_res = 6;
+  string validity_date = 7;
+  string v_member_short_id = 8;
+}
+
+message ModifyOrderResponse {}
+
+// DELETE /order: cancel a single order. Requires delete_order.
+message CancelOrderRequest {
+  string client_order_id = 1;
+}
+
+message CancelOrderResponse {}
+
+// DELETE /orders: cancel all resting orders. Requires delete_order.
+message CancelAllOrdersRequest {}
+
+message CancelAllOrdersResponse {
+  // Number of active orders at dispatch time: how many orders the
+  // cancel-all targeted, not how many cancellation confirmations have
+  // been received. Mirrors the REST `{"deleted": n}` body.
+  uint32 deleted = 1;
+}
+
+// GET /order?client_order_id=...: look up one order (pending or confirmed).
+message GetOrderRequest {
+  string client_order_id = 1;
+}
+
+message GetOrderResponse {
+  // Exactly one of these is populated depending on where the order currently lives.
+  OwnOrder confirmed = 1;
+  PendingOrder pending = 2;
+}
+
+// GET /orders: list all confirmed resting orders, optionally filtered.
+//
+// Filter priority mirrors REST GET /orders:
+//   1. delivery_area + contract_id: exact contract match.
+//   2. delivery_area + product (+ optional delivery_start): all contracts
+//      in the area for that product; delivery_start narrows to one contract.
+//   3. delivery_area alone: all resting orders in that area.
+//   4. No filter: all resting orders.
+//
+// contract_id (or product) without delivery_area is INVALID_ARGUMENT (the
+// store index is keyed by area and M7 reuses contract ids across areas);
+// a negative contract_id is likewise INVALID_ARGUMENT.
+message ListOrdersRequest {
+  string delivery_area = 1;            // "" == all areas
+  int64 contract_id = 2;               // 0 == unset; requires delivery_area
+  string product = 3;                  // "" == unset; requires delivery_area; ignored when contract_id set
+  string delivery_start = 4;           // RFC 3339; "" == unset; only meaningful with product
+  // Optional virtual-member short_id filter (e.g. "VM001"). When non-empty the
+  // result is narrowed to just that member; PermissionDenied unless the caller
+  // is assigned to it or holds read_orders / bypass_member_check. Empty = the
+  // caller's default scope (all assigned members, or the firm-wide book for a
+  // broad-read caller).
+  string v_member_short_id = 5;
+}
+
+message ListOrdersResponse {
+  repeated OwnOrder orders = 1;
+}
+
+// ---- Market data ------------------------------------------------------------
+
+// GET /contract/{area_id}: list all contracts for a delivery area.
+message ListContractsRequest {
+  string area_id = 1;
+}
+
+message ListContractsResponse {
+  repeated Contract contracts = 1;     // sorted by dlvry_start ascending
+}
+
+// GET /contract/{area_id}/{contract_id}
+message GetContractRequest {
+  string area_id = 1;
+  string contract_id = 2;
+}
+
+// GET /contract/{area_id}/by-delivery/{prod}/{dlvry_start}
+message GetContractByDeliveryRequest {
+  string area_id = 1;
+  string prod = 2;
+  string dlvry_start = 3;              // RFC 3339
+}
+
+// GET /hub2hub?delivery_area_from=...&delivery_from=...&delivery_to=...
+message GetHub2HubRequest {
+  // Source hub. Field name matches the REST query param `delivery_area_from`.
+  string delivery_area_from = 1;
+  string delivery_from = 2;            // RFC 3339; inclusive lower bound on dlvry_start
+  string delivery_to = 3;              // RFC 3339; exclusive upper bound on dlvry_start
+  // Destination hub filter; "" == all destinations reachable from the
+  // source hub. Mirrors the REST `delivery_area_to` query param.
+  string delivery_area_to = 4;
+}
+
+message GetHub2HubResponse {
+  bool enabled = 1;
+  bool capacity_connected = 2;
+  repeated AtcEntry data = 3;
+}
+
+// One row of hub-to-hub ATC capacity.
+//
+// Optional price fields carry the best resting bid/ask in each area for the
+// same delivery window so cross-border-spread tools don't have to maintain
+// per-area contracts subscriptions. Prices follow the project-wide
+// CCY/MWh × 100 fixed-point convention (sint64 widened to wrappers for proto3
+// presence, since 0 and negative are legitimate power-market prices).
+// Absent (nil on the wire) when no resting quote is available on that side.
+message AtcEntry {
+  // v1 used `uint32 capacity_mw = 5`, which clamped negative ATC (which M7
+  // does publish) to 0 and asserted a unit the feed does not guarantee.
+  // Replaced by the signed pass-through pair `atc_out` / `atc_in` below.
+  reserved 5;
+  reserved "capacity_mw";
+
+  string source_area = 1;
+  string target_area = 2;
+  string dlvry_start = 3;
+  string dlvry_end = 4;
+  google.protobuf.Int64Value source_best_bid = 6;
+  google.protobuf.Int64Value source_best_ask = 7;
+  google.protobuf.Int64Value dest_best_bid = 8;
+  google.protobuf.Int64Value dest_best_ask = 9;
+  // ATC out of source_area toward target_area, raw signed M7 value in sub-MW
+  // (MW x 1000); divide by 1000 for MW, the same scale as order/trade
+  // quantity; mirrors the REST `atc_out` field. May be negative (M7 publishes
+  // negative ATC). The M7 XSD does not formally annotate the ATC unit, but the
+  // feed encodes it in sub-MW like every other M7 power quantity (confirmed
+  // against the live feed).
+  sint64 atc_out = 10;
+  // ATC in the inbound direction (into source_area), raw signed M7 value in
+  // sub-MW (MW x 1000); divide by 1000 for MW. May be negative.
+  sint64 atc_in = 11;
+  // M7 revision number of the publication this row came from.
+  int64 revision_no = 12;
+  // Timestamp of the M7 ATC publication, RFC 3339.
+  string timestmp = 13;
+}
+
+// ---- System -----------------------------------------------------------------
+
+message GetStateRequest {}
+
+// Snapshot of the system's runtime state. Mirrors REST `GET /state`, with
+// one deliberate exception: the `amqp_authenticated_with` block is omitted
+// entirely on gRPC (REST returns it with only its `v7_token` secret
+// stripped).
+message SystemState {
+  // Process uptime formatted as e.g. "2h 14m 03s" (matches REST shape).
+  string uptime = 1;
+  // `true` when every required subsystem is healthy.
+  bool operational = 2;
+  // Human-readable descriptions of failing health checks. Empty when
+  // `operational` is true.
+  repeated string issues = 3;
+
+  // ── AMQP ────────────────────────────────────────────────────────────
+  bool amqp_connected = 10;
+  bool amqp_private_consumer_healthy = 11;
+  bool amqp_broadcast_consumer_healthy = 12;
+  bool amqp_publisher_healthy = 13;
+  // Remaining capacity of the bounded publisher_tx channel.
+  uint32 amqp_publisher_tx_capacity = 14;
+  // `true` when M7 has the market open for trading.
+  bool amqp_market_active = 15;
+
+  // ── WS order-book stream ────────────────────────────────────────────
+  bool ws_order_book_stream_connected = 20;
+  bool ws_order_book_sequence_healthy = 21;
+  bool ws_order_book_synchronized = 22;
+  int64 ws_order_book_pong = 23;
+  int64 ws_order_book_delta = 24;
+  uint64 ws_order_book_delta_per_hour = 25;
+  // Rolling-average display strings, same formatting as the REST shape
+  // (e.g. "1.2 ms"); "" until the first sample window completes.
+  string ws_order_book_avg_processing_time = 26;
+  string ws_order_book_avg_latency = 27;
+
+  // ── WS private-data stream ──────────────────────────────────────────
+  bool ws_private_data_stream_connected = 30;
+  bool ws_private_data_sequence_healthy = 31;
+  bool ws_private_data_synchronized = 32;
+  int64 ws_private_data_pong = 33;
+  uint64 ws_private_data_delta_per_hour = 34;
+  string ws_private_data_avg_processing_time = 35;
+  string ws_private_data_avg_latency = 36;
+
+  // ── Voltnir trading profile ─────────────────────────────────────────
+  // `trading_enabled` (40) and `order_pos_limit` (41) used to ride along here as
+  // convenience fields. They moved to the dedicated `SystemStatus` aggregate
+  // (GetStatus / WatchStatus) when `status` was brought to full transport parity;
+  // `SystemState` is now pure runtime health. Reserved so the field
+  // numbers/names are never reused.
+  reserved 40, 41;
+  reserved "trading_enabled", "order_pos_limit";
+
+  // ── License ─────────────────────────────────────────────────────────
+  // Mirrors the REST `/state` `license` block. The full installed license;
+  // expiry status never gates trading and never drops a connection.
+  LicenseView license = 50;
+}
+
+message GetStatusRequest {}
+
+// Snapshot of trading posture & risk limits. Mirrors REST `GET /status`, the WS
+// `get_status` command, and the `status` stream frame (minus the
+// `stream`/`sent_at_ms` envelope). The peer of `SystemState` (runtime health).
+// Read gate: `read_status`.
+message SystemStatus {
+  // M7 order-message throttling counters and window state.
+  ThrottlingStatus throttling = 1;
+  // Whether trading is currently enabled (the kill switch).
+  bool trading_enabled = 2;
+  // `true` when every required subsystem is healthy (also on `SystemState`).
+  bool operational = 3;
+  // M7-reported per-currency cash/margin feed. Distinct from `cash_limit`
+  // (the Voltnir-configured order limit). Same shape as GetCashLimitsResponse.
+  repeated CashLimit cash_limits = 4;
+  // Per-contract net position limit in sub-MW units.
+  sint32 order_pos_limit = 5;
+  // Voltnir's own cash-limit state: configured limit, live consumption, and
+  // remaining headroom per currency pool, in cents.
+  CashLimitStatus cash_limit = 6;
+  // The full installed license (also on `SystemState`).
+  LicenseView license = 7;
+}
+
+// Voltnir cash-limit state for the status frame: the configured global
+// (overarching-member) limit, current consumption, and remaining headroom per
+// currency pool, all in cents. `*_limit_cents == 0` means that pool is not
+// enforced. `remaining = limit − consumed`. Distinct from `CashLimit` (the
+// M7-reported margin feed).
+message CashLimitStatus {
+  int64 eur_limit_cents = 1;
+  int64 eur_consumed_cents = 2;
+  int64 eur_remaining_cents = 3;
+  int64 gbp_limit_cents = 4;
+  int64 gbp_consumed_cents = 5;
+  int64 gbp_remaining_cents = 6;
+}
+
+// The full installed license: status, entitlement summary, validity window,
+// holder identity, authorized EPEX identities, and signing provenance. Mirrors
+// the REST `/state` `license` projection.
+message LicenseView {
+  // "active" | "expiring_soon" | "expired" | "in_grace".
+  string status_kind = 1;
+  // Whole days: remaining (when expiring_soon) or elapsed since expiry
+  // (in_grace / expired); 0 for active.
+  sint64 status_days = 2;
+  string license_id = 3;
+  // Capability tier (schema v2): "trader" or "desk".
+  string mode = 4;
+  string environment = 5;
+  reserved 6, 8, 10;  // removed in schema v2: feature_tier, max_ui_users, features
+  reserved "feature_tier", "max_ui_users", "features";
+  // RFC 3339 expiry instant (`…Z`).
+  string expires_at = 7;
+  // RFC 3339 issue instant (`…Z`).
+  string issued_at = 9;
+  // License format version.
+  uint32 schema_version = 11;
+  // Always "voltnir" for a verified license.
+  string issuer = 12;
+  // `key_id` of the Ed25519 key that signed the license.
+  string signing_key_id = 13;
+  // Holder identity. Absent for `free_sim_universal` (no `holder` field set).
+  LicenseHolder holder = 14;
+  // `true` when any EPEX identity is authorized (sim licenses); when `false`,
+  // `epex_identities` lists the permitted accounts.
+  bool epex_any = 15;
+  // Permitted EPEX trading identities. Empty when `epex_any` is true.
+  repeated EpexIdentityView epex_identities = 16;
+}
+
+// Holder a license is issued to. Omitted for `free_sim_universal`.
+message LicenseHolder {
+  string legal_entity = 1;
+  string portal_user_id = 2;
+}
+
+// A single EPEX trading identity a license authorizes.
+message EpexIdentityView {
+  string account_id = 1;
+  string user_id = 2;
+}
+
+message GetThrottlingRequest {}
+
+// M7 throttling status counters. Every field is `optional` because all
+// fields are absent until the first ThrottlingStatusResp arrives from
+// M7, and proto3 distinguishes "absent" from "zero" only for optional
+// fields. Units are milliseconds for periods, counts for OMTs.
+message ThrottlingStatus {
+  optional string mbr_id = 1;
+  optional string timestamp = 2;        // ISO 8601
+  optional string status = 3;           // "OK" / "L1" / "L2"
+
+  // Short-term window (seconds granularity).
+  optional int64  short_observation_period = 10;
+  optional int64  short_tolerance_period = 11;
+  optional int64  short_reconnection_cool_down = 12;
+  optional int64  short_omt_limit_l1 = 13;
+  optional int64  short_omt_limit_l2 = 14;
+  optional string short_status = 15;
+  optional int64  short_current_omt_count = 16;
+
+  // Long-term window (hour granularity).
+  optional int64  long_observation_period = 20;
+  optional int64  long_tolerance_period = 21;
+  optional int64  long_reconnection_cool_down = 22;
+  optional int64  long_omt_limit_l1 = 23;
+  optional int64  long_omt_limit_l2 = 24;
+  optional string long_status = 25;
+  optional int64  long_current_omt_count = 26;
+}
+
+message GetSystemInfoRequest {}
+
+// One entry of the M7 per-message-type request rate-limit table.
+message RequestLimit {
+  string message = 1;      // M7 request message type, e.g. "LoginReq"
+  uint64 duration_ms = 2;  // observation window in milliseconds
+  uint64 rate = 3;         // max requests of this type within the window
+}
+
+// M7 system parameters captured on connection (backend version, time zones,
+// data-retention windows, the per-session order cap, request rate limits, and
+// capabilities). Every scalar is `optional` because the snapshot is empty until
+// the first SystemInfoResp arrives from M7 (mirrors the all-null REST/WS body);
+// request_limits is empty until then.
+message SystemInfo {
+  optional string market_id = 1;
+  optional string backend_version = 2;
+  optional string backend_time_zone = 3;
+  optional string backend_market_time_zone = 4;
+  optional uint32 contract_store_time_in_days = 5;
+  optional uint32 trade_pool_store_time_in_hours = 6;
+  optional uint32 max_orders = 7;
+  optional string capabilities = 8;
+  optional string allowed_clearing_acct_types = 9;
+  repeated RequestLimit request_limits = 10;
+  // This gateway's own software version (from Cargo.toml). Distinct from
+  // backend_version (the M7 exchange's build). Always set, even before the
+  // first SystemInfoResp arrives, so it is not optional.
+  string voltnir_version = 11;
+}
+
+message GetContractLimitRequest {}
+
+message SetContractLimitRequest {
+  // Sub-MW. Must be non-negative. 0 is fully supported and means BLOCK
+  // all new position-taking (every order that would move |net position|
+  // above 0 is rejected): the operator kill-switch. 0 does NOT disable
+  // the limit check.
+  sint32 quantity = 1;
+}
+
+message ContractLimitResponse {
+  sint32 quantity = 1;                 // sub-MW
+}
+
+message GetCashLimitRequest {}
+
+message SetCashLimitRequest {
+  // Global (overarching-member) cash limit in cents of `currency`. Must be
+  // non-negative. 0 disables that pool's cash check. Per-member limits are
+  // always capped at this value. Distinct from the M7-reported GetCashLimits.
+  sint64 cents = 1;
+  // Pool to set: "eur" (default when empty) or "gbp". EUR and GBP are
+  // independent pools (ECC settles them separately).
+  string currency = 2;
+}
+
+message CashLimitResponse {
+  sint64 cents = 1;                    // EUR pool, cents; 0 = disabled
+  sint64 gbp_cents = 2;                // GBP pool, cents; 0 = disabled
+}
+
+message GetCashFailClosedRequest {}
+
+message SetCashFailClosedRequest {
+  // true = ECC fail-closed (a 0/unset cash limit means no trading in that pool);
+  // false = disabled-on-zero (the pool is unbounded at a 0 limit). ECC parity is
+  // `true`; Voltnir's historical default is `false`.
+  bool enabled = 1;
+}
+
+message CashFailClosedResponse {
+  bool enabled = 1;
+}
+
+// ---- Bank-holiday calendars (cash-limit exposure window) --------------------
+
+// One configured non-working date for a currency's exposure window. EUR and GBP
+// keep independent calendars (GB bank holidays close CHAPS, so the GBP window
+// rolls over a different set than the EUR/TARGET2 window). Both share the 16:00
+// reset; only the holiday dates differ.
+message Holiday {
+  string date = 1;   // YYYY-MM-DD, local to the exposure-window timezone
+  string label = 2;  // optional display label ("" = none); ignored by the math
+}
+
+message GetHolidaysRequest {}
+
+// Both calendars, returned by every holiday RPC (the state after the call).
+message HolidaysResponse {
+  repeated Holiday eur = 1;
+  repeated Holiday gbp = 2;
+}
+
+// Replace one currency's whole calendar.
+message SetHolidaysRequest {
+  string currency = 1;          // "eur" or "gbp"
+  repeated Holiday holidays = 2;
+}
+
+// Add one date to a currency.
+message AddHolidayRequest {
+  string currency = 1;          // "eur" or "gbp"
+  string date = 2;              // YYYY-MM-DD
+  string label = 3;             // optional ("" = none)
+}
+
+// Remove one date from a currency.
+message RemoveHolidayRequest {
+  string currency = 1;          // "eur" or "gbp"
+  string date = 2;              // YYYY-MM-DD
+}
+
+message GetTradingAllowedRequest {}
+
+message SetTradingAllowedRequest {
+  bool allowed = 1;
+}
+
+message TradingAllowedResponse {
+  bool allowed = 1;
+}
+
+message GetSelfTradePolicyRequest {}
+
+message SetSelfTradePolicyRequest {
+  SelfTradePolicy policy = 1;
+}
+
+message SelfTradePolicyResponse {
+  SelfTradePolicy policy = 1;
+}
+
+message RestartRequest {}
+
+message RestartResponse {
+  string message = 1;
+}
+
+// ---- Cash limits ------------------------------------------------------------
+
+// GET /api/v1/cash_limits: current cash/margin state per currency.
+message GetCashLimitsRequest {}
+
+// One currency's cash-limit slice as reported by M7. Every field past
+// `currency` is `optional` because parsing failures or partial reports
+// leave fields unset.
+//
+// Raw values are paired with `dec_shft`: human-readable amount =
+// raw / 10^dec_shft. Divide by 10^dec_shft to render.
+message CashLimit {
+  string currency = 1;                    // ISO code, e.g. "EUR"
+  optional int64 current_limit = 2;       // raw M7 integer
+  optional int64 current_revision = 3;
+  optional int64 configured_limit = 4;    // raw M7 integer (configured max)
+  optional uint32 dec_shft = 5;           // decimal-shift factor (u8 in domain)
+  optional string lmt_id = 6;
+  optional string state = 7;
+  optional string start_date = 8;
+  optional int64 revision_no = 9;
+}
+
+message GetCashLimitsResponse {
+  repeated CashLimit limits = 1;
+}
+
+// ---- Permission catalog -----------------------------------------------------
+
+// GET /api/v1/permissions: the catalog of assignable permissions.
+message ListPermissionsRequest {}
+
+// One assignable permission: its canonical code (the token stored on a user
+// and accepted by SetPermissions) and a human-readable description.
+message PermissionInfo {
+  string code = 1;
+  string description = 2;
+}
+
+message ListPermissionsResponse {
+  repeated PermissionInfo permissions = 1;
+}
+
+// ---- PnL --------------------------------------------------------------------
+
+// GET /api/v1/pnl: full PnL snapshot (all four scopes), computed on demand.
+//
+// Money values are q8 units = M7-px (EUR/MWh × 100) × sub-MW (MWh × 1000)
+// = EUR × 100_000. Divide by 100_000 to render EUR.
+message GetPnlRequest {
+  // Optional virtual-member short_id filter (e.g. "VM001"). When non-empty the
+  // snapshot is narrowed to just that member; PermissionDenied unless the caller
+  // is assigned to it or holds read_pnl / bypass_member_check. Empty = the
+  // caller's default scope (all assigned members, or the firm-wide snapshot for
+  // a broad-read caller).
+  string v_member_short_id = 1;
+}
+
+message PnlSnapshot {
+  // One entry per (area_id, contract_id) that has any ACTI trade.
+  repeated ContractPnl per_contract = 1;
+  // Roll-up across contracts in each (area_id, product) bucket.
+  repeated AreaProductPnl per_area_prod = 2;
+  // One entry per (v_member_short_id, area_id, contract_id).
+  repeated VmContractPnl per_vm = 3;
+  // Roll-up per (v_member_short_id, area_id, product).
+  repeated VmAreaProductPnl per_vm_area_prod = 4;
+  int64 computed_at_ms = 5;               // Unix ms UTC
+  uint32 compute_us = 6;                  // microseconds spent in compute()
+}
+
+message ContractPnl {
+  string area_id = 1;
+  uint64 contract_id = 2;
+  optional string product = 3;            // unset until contract metadata loaded
+  sint64 signed_position = 4;             // sub-MW; +long / -short
+  optional sint64 avg_open_px = 5;        // M7 units; unset when flat
+  // M7 units; unset when no mark. Same width as avg_open_px so clients
+  // can do arithmetic across the two without casts.
+  optional sint64 mark_px = 6;
+  MarkSource mark_source = 7;
+  sint64 realized_pnl = 8;                // q8 units (EUR × 100_000)
+  sint64 unrealized_pnl = 9;              // q8 units
+}
+
+message AreaProductPnl {
+  string area_id = 1;
+  string product = 2;
+  sint64 realized_pnl = 3;
+  sint64 unrealized_pnl = 4;
+}
+
+message VmContractPnl {
+  string v_member_short_id = 1;
+  string area_id = 2;
+  uint64 contract_id = 3;
+  optional string product = 4;
+  sint64 signed_position = 5;
+  optional sint64 avg_open_px = 6;
+  optional sint64 mark_px = 7;            // M7 units; same width as avg_open_px
+  MarkSource mark_source = 8;
+  sint64 realized_pnl = 9;
+  sint64 unrealized_pnl = 10;
+}
+
+message VmAreaProductPnl {
+  string v_member_short_id = 1;
+  string area_id = 2;
+  string product = 3;
+  sint64 realized_pnl = 4;
+  sint64 unrealized_pnl = 5;
+}
+
+// ---- Public trades ----------------------------------------------------------
+
+// GET /api/v1/public_trades: sliding-window market-wide trade tape.
+//
+// Returns up to `limit` most-recent public trades, sorted ascending by
+// `exec_time_ms`. `contract_id` and `area_id` are optional in-handler
+// filters; `area_id` matches when either the buy- or sell-side delivery
+// area equals it.
+message ListPublicTradesRequest {
+  uint32 limit = 1;                       // 0 == default (100); capped at 1000
+  uint64 contract_id = 2;                 // 0 == all contracts
+  string area_id = 3;                     // "" == all areas; max 64 chars
+}
+
+// One public-trade record. `buy_dlvry_area` /
+// `sell_dlvry_area` use "" as the absent sentinel (proto3 has no
+// nullable strings).
+message PublicTrade {
+  string trade_id = 1;
+  uint64 contract_id = 2;
+  int64 qty = 3;                          // sub-MW (MWh × 1000)
+  sint64 px = 4;                          // M7 price units (EUR/MWh × 100)
+  string exec_time = 5;                   // RFC 3339 from exchange
+  int64 exec_time_ms = 6;                 // parsed millis since epoch
+  int64 revision_no = 7;
+  string state = 8;                       // M7 trade state: ACTI, CNCL, RREQ, RGRA, RREJ, CREQ, CREJ, RSFA
+  string buy_dlvry_area = 9;              // "" == absent
+  string sell_dlvry_area = 10;            // "" == absent
+  bool self_trade = 11;
+}
+
+message ListPublicTradesResponse {
+  repeated PublicTrade trades = 1;
+}
+
+// ---- Users & Members --------------------------------------------------------
+
+message GetMeRequest {}
+message GetMyMembersRequest {}
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  repeated UserProfile users = 1;
+}
+
+message CreateUserRequest {
+  string username = 1;
+  repeated string permissions = 2;
+}
+
+message CreateUserResponse {
+  UserProfile user = 1;
+  string api_key = 2;                  // shown only once on creation
+}
+
+message DeleteUserRequest {
+  string user_id = 1;
+}
+
+message SetPermissionsRequest {
+  string user_id = 1;
+  repeated string permissions = 2;
+}
+
+message RotateApiKeyRequest {
+  string user_id = 1;
+}
+
+message RotateApiKeyResponse {
+  string api_key = 1;                  // the new key, shown only once
+}
+
+message GetUserMembersRequest {
+  string user_id = 1;
+}
+
+message UserMembersResponse {
+  // Member UUIDs (the `Member.id` values), NOT short_ids. Mirrors the REST
+  // `member_ids` field.
+  repeated string member_ids = 1;
+}
+
+message SetUserMembersRequest {
+  string user_id = 1;
+  // Member UUIDs (the `Member.id` values), NOT short_ids.
+  repeated string member_ids = 2;
+}
+
+message ListMembersRequest {}
+
+message MemberListResponse {
+  repeated Member members = 1;
+}
+
+message CreateMemberRequest {
+  // The server generates the short_id itself; any request value is ignored.
+  // The generated short_id is returned in the `Member` response.
+  reserved 1;
+  reserved "short_id";
+
+  string name = 2;
+  sint64 max_position = 3;
+  sint64 cash_limit = 4;             // EUR cents; 0 = no override (global applies)
+  sint64 cash_limit_gbp = 5;         // GBP cents; separate-pool mode; 0 = no override
+}
+
+message PatchMemberRequest {
+  string id = 1;
+  // Only fields that are set on the wire are applied; unset fields skipped.
+  google.protobuf.StringValue name = 2;
+  google.protobuf.Int64Value max_position = 3;
+  google.protobuf.BoolValue active = 4;
+  // EUR cents; 0 clears the per-member override (global applies). The field the
+  // overarching member lowers when next-window collateral is insufficient.
+  google.protobuf.Int64Value cash_limit = 5;
+  // GBP cents; 0 clears the per-member GBP override (separate-pool mode only).
+  google.protobuf.Int64Value cash_limit_gbp = 6;
+}
+
+// ---- Audit ------------------------------------------------------------------
+
+// Cursor-based pagination. "" as next_cursor signals the last page
+// (proto3 strings cannot be null).
+message AuditOrdersRequest {
+  string cursor = 1;
+  uint32 limit = 2;                    // 0 == default (50); capped at 200
+  string date_from = 3;                // RFC 3339
+  string date_to = 4;                  // RFC 3339
+  string area = 5;
+  string product = 6;
+  string status = 7;
+  string user_code = 8;                 // EPEX trader/user code (renamed from user_id)
+  string v_member_short_id = 9;
+  string voltnir_user_short_id = 10;    // submitting Voltnir user's short id (U001)
+  string voltnir_username = 11;         // submitting Voltnir user's username snapshot
+}
+
+message AuditOrderItem {
+  // Mirrors REST audit row one-to-one; kept as a JSON-like payload in v1 to
+  // avoid proliferating proto messages for every audit column. Refactor to
+  // typed fields in a future version if needed.
+  string json = 1;
+}
+
+message AuditOrdersResponse {
+  repeated AuditOrderItem items = 1;
+  string next_cursor = 2;              // "" == last page
+  uint64 total_hint = 3;               // 0 == not available on this page
+}
+
+message AuditTradesRequest {
+  string cursor = 1;
+  uint32 limit = 2;                    // 0 == default (50); capped at 200
+  string date_from = 3;
+  string date_to = 4;
+  string area = 5;
+  string product = 6;
+  string user_code = 7;                 // EPEX trader/user code (renamed from user_id)
+  string v_member_short_id = 8;
+  // Which timestamp date_from/date_to filter on:
+  //   "" / "delivery"  -> contract delivery window, overlap semantics (the default)
+  //   "execution"      -> execution time (executed_at)
+  // Any other value is rejected with INVALID_ARGUMENT.
+  string time_basis = 9;
+  string voltnir_user_short_id = 10;    // submitting Voltnir user's short id (U001)
+  string voltnir_username = 11;         // submitting Voltnir user's username snapshot
+}
+
+message AuditTradeItem {
+  string json = 1;
+}
+
+message AuditTradesResponse {
+  repeated AuditTradeItem items = 1;
+  string next_cursor = 2;
+  uint64 total_hint = 3;
+}
+
+// Query the persisted market-wide public trade tape (M7 PblcTradeConfRprt).
+// Populated only when storage.persist_public_trades is enabled on the gateway.
+message AuditPublicTradesRequest {
+  string cursor = 1;
+  uint32 limit = 2;                    // 0 == default (50); capped at 200
+  string date_from = 3;
+  string date_to = 4;
+  string area = 5;     // matches the buy OR sell delivery area
+  string product = 6;
+  string state = 7;    // trade state, e.g. "ACTI", "CNCL"
+}
+
+message AuditPublicTradeItem {
+  // JSON object of one public trade. px is Eurocents (1 EUR = 100).
+  string json = 1;
+}
+
+message AuditPublicTradesResponse {
+  repeated AuditPublicTradeItem items = 1;
+  string next_cursor = 2;
+  uint64 total_hint = 3;
+}
+
+// Compliance audit-event log: the append-only who-did-what record of
+// actor-driven mutations (mirrors REST GET /audit/events). Gated by read_audit.
+message AuditEventsRequest {
+  string cursor = 1;
+  uint32 limit = 2;          // 0 == default (50); capped at 200
+  string date_from = 3;
+  string date_to = 4;
+  string action = 5;         // event action token, e.g. "permissions_set"
+  string target_type = 6;    // e.g. "user", "member", "profile"
+  string actor_short_id = 7; // acting user's short id, e.g. "U001"
+  string outcome = 8;        // "ok", "denied", "error"
+}
+
+message AuditEventItem {
+  // JSON object of one audit event: actor, transport, source_ip, action,
+  // target, before/after snapshots, outcome, reason, ts.
+  string json = 1;
+}
+
+message AuditEventsResponse {
+  repeated AuditEventItem items = 1;
+  string next_cursor = 2;
+  uint64 total_hint = 3;
+}
+
+// M7 exchange-error log: the append-only record of M7-side faults observed off
+// the AMQP line (mirrors REST GET /audit/m7_errors). Gated by read_m7_errors.
+message M7ErrorsRequest {
+  string cursor = 1;
+  uint32 limit = 2;       // 0 == default (50); capped at 200
+  string date_from = 3;
+  string date_to = 4;
+  string kind = 5;        // fault class, e.g. "err_resp", "seq_gap"
+  string category = 6;    // DFS200 §4 section, e.g. "order_entry", "limits"
+  int64 err_code = 7;     // raw M7 numeric code; 0 == unset (filter omitted)
+}
+
+message M7ErrorItem {
+  // JSON object of one m7_errors row: received_at, kind, category, err_code,
+  // err_identifier, err_text, cl_ordr_id, client_correlation_id, var_list,
+  // voltnir_*, raw_payload, severity.
+  string json = 1;
+}
+
+message M7ErrorsResponse {
+  repeated M7ErrorItem items = 1;
+  string next_cursor = 2;
+  uint64 total_hint = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming RPCs: messages.
+// ---------------------------------------------------------------------------
+
+// Parameters for ExportOrders / ExportTrades server-streaming RPCs.
+// Replaces the REST POST-then-poll flow with a single streaming call.
+message ExportRequest {
+  ExportFormat format = 1;             // JSON or CSV (required)
+  string from = 2;                     // RFC 3339 (required)
+  string to = 3;                       // RFC 3339 (required), must be after from
+  string area = 4;                     // "" == all areas
+  string product = 5;                  // "" == all products
+}
+
+// One chunk of the export file. Concatenate all chunks in order to obtain
+// the full file. Format is what was requested.
+message ExportChunk {
+  bytes data = 1;
+}
+
+// Subscribe to every mutation affecting one specific contract.
+message WatchContractRequest {
+  string area_id = 1;
+  string contract_id = 2;              // M7 numeric id as string
+}
+
+// One event in the WatchContract stream.
+message ContractEvent {
+  // Why this event was emitted. SNAPSHOT is always the first message after
+  // subscribe and may also be re-emitted if the server falls behind and
+  // recovers (broadcast Lagged path).
+  enum EventType {
+    SNAPSHOT = 0;
+    // Order-book content changed (per-order book rows, best bid/ask, last trade).
+    ORDER_BOOK_UPDATE = 1;
+    // Contract metadata or lifecycle state changed (trading phase,
+    // ACTI/SUSP/CLOS, ContractInfoRprt revision). Also the final event
+    // before the stream closes on delete/tombstone/deactivation.
+    STATE_CHANGE = 2;
+    // A trade touched the contract. Fires for own executions AND
+    // public-tape trades, deduplicated on (trade_id, revision_no) since
+    // an own execution is usually mirrored on the public tape.
+    TRADE = 3;
+  }
+  EventType type = 1;
+  Contract contract = 2;               // full state on every event
+}
+
+// Subscribe to every mutation affecting one specific order (by coid).
+message WatchOrderRequest {
+  string client_order_id = 1;
+}
+
+// One event in the WatchOrder stream.
+//
+// For a still-pending order (submitted, not yet acked by M7) the initial
+// SNAPSHOT body has state == PENDING and order_id == 0; side, price,
+// quantity, contract, and area are the real submitted values. The ack
+// arrives as the next event with the real order_id.
+message OrderEvent {
+  enum EventType {
+    SNAPSHOT = 0;
+    UPDATE = 1;
+    // Full fill via the trade path. `order` is the final body captured
+    // before removal: quantity == 0, state == INACTIVE, real price/side/ids.
+    // Terminal; the stream closes after this event.
+    FILLED = 2;
+    // The order left the book without a trade-path fill. M7's INACTIVE
+    // state does not distinguish cancel from expiry (or an OER-reported
+    // fill); all of them surface here. Terminal.
+    CANCELLED = 3;
+    // Rejected by M7 or the local pre-check. Terminal.
+    REJECTED = 4;
+  }
+  EventType type = 1;
+  OwnOrder order = 2;
+}
+
+// Subscribe to every mutation affecting the caller's order list, optionally
+// scoped by delivery area and contract.
+message WatchOrdersRequest {
+  string delivery_area = 1;            // "" == no filter
+  string contract_id = 2;              // "" == no filter; requires delivery_area
+  // Optional virtual-member short_id filter (e.g. "VM001"). When non-empty the
+  // stream (snapshot + events) is narrowed to just that member; PermissionDenied
+  // unless the caller is assigned to it or holds read_orders /
+  // bypass_member_check. Empty = the caller's default scope.
+  string v_member_short_id = 3;
+}
+
+// One event in the WatchOrders stream. Every non-SNAPSHOT event carries
+// exactly one order in `orders`.
+message OrdersEvent {
+  enum EventType {
+    SNAPSHOT = 0;                      // `orders` carries the full current list
+    // First confirmed appearance of an order in the store. A
+    // modify-as-delete+re-create successor is MODIFIED, not ADDED.
+    ADDED = 1;
+    MODIFIED = 2;
+    // The order left the book without a trade-path fill (cancel, expiry,
+    // or an OER-reported fill; M7 does not distinguish them).
+    CANCELLED = 3;
+    // Full fill via the trade path; the order body is the final state
+    // captured before removal (quantity == 0, state == INACTIVE).
+    FILLED = 4;
+  }
+  EventType type = 1;
+  repeated OwnOrder orders = 2;
+}
+
+// Subscribe to the caller's filled trades. Authenticated; no permission
+// required, matching the WS `trades` subscription, which delivers the full
+// trade list to any authenticated session.
+message WatchTradesRequest {}
+
+// One event in the WatchTrades stream. The first message is SNAPSHOT carrying
+// the full current trade list; each subsequent execution is an UPSERTED event
+// carrying exactly one trade.
+message TradeEvent {
+  enum EventType {
+    SNAPSHOT = 0;   // `trades` carries the full current list
+    UPSERTED = 1;   // `trades` carries exactly one new/revised trade
+  }
+  EventType type = 1;
+  repeated OwnTrade trades = 2;
+}
+
+// Subscribe to the market-wide public trade tape. Authenticated; no permission
+// required (matches ListPublicTrades). No snapshot: each message is one live
+// public trade as it arrives; clients filter by contract_id / area_id inline.
+message WatchPublicTradesRequest {}
+
+// Subscribe to the caller's derived P&L. Authenticated; member-scoped like
+// GetPnl. The stream emits an immediate PnlSnapshot then a fresh one each
+// second (polled; P&L is a computed view, not an event).
+message WatchPnlRequest {
+  // Optional virtual-member short_id filter; same semantics as GetPnl.
+  string v_member_short_id = 1;
+}
+
+// Subscribe to the full runtime-health snapshot (mirrors GetState). The stream
+// emits an immediate SystemState then a fresh one each second. Read gate:
+// `read_state`.
+message WatchStateRequest {}
+
+// Subscribe to the trading-posture & risk-limit aggregate (mirrors GetStatus and
+// the WS `status` stream). Emits an immediate SystemStatus then a fresh one each
+// second. Read gate: `read_status`.
+message WatchStatusRequest {}
+
+// Subscribe to the live system / order-rejection message log. Authenticated;
+// no permission required (matches the data exposed under GetState). The first
+// message is the current log; subsequent messages carry newly-appended entries.
+message WatchMessagesRequest {}
+
+// One system-message row, serialised as JSON (event, order_id, contract_id,
+// side, price, quantity, user_code, text, ts_ms). JSON keeps the rolling-log
+// shape identical to the REST `/state` `messages` array without a parallel
+// structured message + enum to maintain.
+message MessageItem {
+  string json = 1;
+}
+
+// Subscribe to the live compliance audit log (mirrors QueryAuditEvents).
+// Gated by read_audit. No snapshot: seed history via QueryAuditEvents; the
+// stream tails rows appended after subscribe. Clients filter inline.
+message WatchAuditEventsRequest {}
+
+// Subscribe to the live M7 exchange-error log (mirrors QueryM7Errors). Gated by
+// read_m7_errors. Same tail semantics as WatchAuditEvents.
+message WatchM7ErrorsRequest {}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+// VoltAPI: the Voltnir external RPC surface.
+//
+// Auth is carried as gRPC metadata `authorization: Bearer <api_key>`. The
+// server hashes the token (SHA-256) and looks it up against the in-memory
+// user cache, identically to the REST middleware. Permission errors map to
+// PERMISSION_DENIED; missing / invalid tokens map to UNAUTHENTICATED.
+//
+// Beyond the per-RPC permissions noted below, `bypass_member_check` lets a
+// caller tag orders with any virtual member without an explicit assignment
+// (checked inside SubmitOrder's member validation, not at the RPC gate).
+service VoltAPI {
+  // ── Orders ────────────────────────────────────────────────────────────
+  // All order RPCs require their respective permission
+  // (create_order, modify_order, delete_order).
+  rpc SubmitOrder (SubmitOrderRequest) returns (SubmitOrderResponse);
+  rpc ModifyOrder (ModifyOrderRequest) returns (ModifyOrderResponse);
+  rpc CancelOrder (CancelOrderRequest) returns (CancelOrderResponse);
+  rpc CancelAllOrders (CancelAllOrdersRequest) returns (CancelAllOrdersResponse);
+  rpc GetOrder (GetOrderRequest) returns (GetOrderResponse);
+  rpc ListOrders (ListOrdersRequest) returns (ListOrdersResponse);
+
+  // ── Market data ───────────────────────────────────────────────────────
+  // Authenticated but no specific permission (mirrors REST GET endpoints).
+  rpc ListContracts (ListContractsRequest) returns (ListContractsResponse);
+  rpc GetContract (GetContractRequest) returns (ContractDetail);
+  rpc GetContractByDelivery (GetContractByDeliveryRequest) returns (ContractDetail);
+  rpc GetHub2Hub (GetHub2HubRequest) returns (GetHub2HubResponse);
+
+  // ── System ────────────────────────────────────────────────────────────
+  // Runtime-health snapshot. Requires read_state.
+  rpc GetState (GetStateRequest) returns (SystemState);
+  // Trading-posture & risk-limit aggregate. Requires read_status.
+  rpc GetStatus (GetStatusRequest) returns (SystemStatus);
+  rpc GetThrottling (GetThrottlingRequest) returns (ThrottlingStatus);
+  rpc GetSystemInfo (GetSystemInfoRequest) returns (SystemInfo);
+  rpc GetContractLimit (GetContractLimitRequest) returns (ContractLimitResponse);
+  // Requires set_position_limit.
+  rpc SetContractLimit (SetContractLimitRequest) returns (ContractLimitResponse);
+  // Global (overarching-member) cash limit. GET is authenticated only;
+  // SET requires set_cash_limit. Distinct from GetCashLimits
+  // (the M7-reported per-currency feed).
+  rpc GetCashLimit (GetCashLimitRequest) returns (CashLimitResponse);
+  rpc SetCashLimit (SetCashLimitRequest) returns (CashLimitResponse);
+  // Cash-limit fail-closed switch (ECC parity). GET is authenticated only;
+  // SET requires set_cash_limit (it is part of the cash-limit control).
+  rpc GetCashFailClosed (GetCashFailClosedRequest) returns (CashFailClosedResponse);
+  rpc SetCashFailClosed (SetCashFailClosedRequest) returns (CashFailClosedResponse);
+  // Bank-holiday calendars for the cash-limit exposure window. GET is
+  // authenticated only; SET/ADD/REMOVE require set_cash_limit
+  // (holidays are part of the cash-limit methodology). EUR and GBP are
+  // independent calendars. Every op returns the resulting HolidaysResponse.
+  rpc GetHolidays (GetHolidaysRequest) returns (HolidaysResponse);
+  rpc SetHolidays (SetHolidaysRequest) returns (HolidaysResponse);
+  rpc AddHoliday (AddHolidayRequest) returns (HolidaysResponse);
+  rpc RemoveHoliday (RemoveHolidayRequest) returns (HolidaysResponse);
+  rpc GetTradingAllowed (GetTradingAllowedRequest) returns (TradingAllowedResponse);
+  // Requires toggle_trading.
+  rpc SetTradingAllowed (SetTradingAllowedRequest) returns (TradingAllowedResponse);
+  rpc GetSelfTradePolicy (GetSelfTradePolicyRequest) returns (SelfTradePolicyResponse);
+  // Requires set_self_trade_policy.
+  rpc SetSelfTradePolicy (SetSelfTradePolicyRequest) returns (SelfTradePolicyResponse);
+  // Requires restart_system.
+  rpc Restart (RestartRequest) returns (RestartResponse);
+
+  // ── Cash limits ────────────────────────────────────────────────────────
+  // GET /api/v1/cash_limits: authenticated; no permission required.
+  rpc GetCashLimits (GetCashLimitsRequest) returns (GetCashLimitsResponse);
+
+  // ── Permission catalog ───────────────────────────────────────────────────
+  // GET /api/v1/permissions: requires manage_users.
+  rpc ListPermissions (ListPermissionsRequest) returns (ListPermissionsResponse);
+
+  // ── PnL ────────────────────────────────────────────────────────────────
+  // GET /api/v1/pnl: authenticated; no permission required. Full snapshot
+  // (all four scopes) recomputed per call. Money in q8 units (EUR × 100_000).
+  rpc GetPnl (GetPnlRequest) returns (PnlSnapshot);
+
+  // ── Public trades ──────────────────────────────────────────────────────
+  // GET /api/v1/public_trades: authenticated; no permission required.
+  rpc ListPublicTrades (ListPublicTradesRequest) returns (ListPublicTradesResponse);
+
+  // ── Users & Members ───────────────────────────────────────────────────
+  // GetMe / GetMyMembers are authenticated-only. Every OTHER user/member
+  // RPC, including the read-only ListUsers, GetUserMembers, and
+  // ListMembers, requires manage_users or
+  // manage_members respectively (same gates as REST).
+  rpc GetMe (GetMeRequest) returns (UserProfile);
+  rpc GetMyMembers (GetMyMembersRequest) returns (MemberListResponse);
+  rpc ListUsers (ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser (CreateUserRequest) returns (CreateUserResponse);
+  rpc DeleteUser (DeleteUserRequest) returns (google.protobuf.Empty);
+  rpc SetPermissions (SetPermissionsRequest) returns (google.protobuf.Empty);
+  rpc RotateApiKey (RotateApiKeyRequest) returns (RotateApiKeyResponse);
+  rpc GetUserMembers (GetUserMembersRequest) returns (UserMembersResponse);
+  rpc SetUserMembers (SetUserMembersRequest) returns (google.protobuf.Empty);
+  rpc ListMembers (ListMembersRequest) returns (MemberListResponse);
+  rpc CreateMember (CreateMemberRequest) returns (Member);
+  rpc PatchMember (PatchMemberRequest) returns (google.protobuf.Empty);
+
+  // ── Audit ─────────────────────────────────────────────────────────────
+  // Requires read_audit.
+  rpc QueryAuditOrders (AuditOrdersRequest) returns (AuditOrdersResponse);
+  rpc QueryAuditTrades (AuditTradesRequest) returns (AuditTradesResponse);
+  rpc QueryAuditPublicTrades (AuditPublicTradesRequest) returns (AuditPublicTradesResponse);
+  rpc QueryAuditEvents (AuditEventsRequest) returns (AuditEventsResponse);
+
+  // ── M7 errors ─────────────────────────────────────────────────────────
+  // Requires read_m7_errors (dedicated, not ReadAudit).
+  rpc QueryM7Errors (M7ErrorsRequest) returns (M7ErrorsResponse);
+
+  // ── Streaming export (replaces REST poll-loop) ────────────────────────
+  // Requires export_reports. Client cancellation is honored immediately.
+  rpc ExportOrders (ExportRequest) returns (stream ExportChunk);
+  rpc ExportTrades (ExportRequest) returns (stream ExportChunk);
+
+  // ── Live push streams (no REST equivalent) ────────────────────────────
+  // Authenticated; permission requirements match the corresponding read
+  // RPCs (none for WatchContract; none for WatchOrder / WatchOrders, same
+  // as REST GET /order and GET /orders).
+  //
+  // Protocol invariants:
+  //   1. The first message after subscribe is always SNAPSHOT (for
+  //      WatchOrder on a still-pending order, its body has
+  //      state == PENDING and order_id == 0).
+  //   2. If the server falls behind, a fresh SNAPSHOT is re-emitted
+  //      before live events resume.
+  //   3. WatchContract closes cleanly after a final STATE_CHANGE when the
+  //      watched contract is deleted, tombstoned, or deactivated; it also
+  //      closes on server shutdown and on caller cancel.
+  //   4. WatchOrder closes cleanly after a terminal FILLED / CANCELLED /
+  //      REJECTED event.
+  rpc WatchContract (WatchContractRequest) returns (stream ContractEvent);
+  rpc WatchOrder (WatchOrderRequest) returns (stream OrderEvent);
+  rpc WatchOrders (WatchOrdersRequest) returns (stream OrdersEvent);
+
+  // Live push streams added for WS⇄gRPC parity. Trades / public trades are
+  // broadcast-driven (snapshot-then-events for trades; events-only for the
+  // tape, re-snapshot on lag for trades). Pnl / state poll at 1 Hz (computed
+  // views, not events). Messages / audit / m7_errors tail an append-only log:
+  // no snapshot (seed via the unary query), rows appended after subscribe are
+  // pushed; clients filter inline. Audit / m7_errors are permission-gated
+  // (read_audit / read_m7_errors), identical to their unary query RPCs.
+  rpc WatchTrades (WatchTradesRequest) returns (stream TradeEvent);
+  rpc WatchPublicTrades (WatchPublicTradesRequest) returns (stream PublicTrade);
+  rpc WatchPnl (WatchPnlRequest) returns (stream PnlSnapshot);
+  // Pnl / state / status poll at 1 Hz (computed views, not events). State
+  // requires read_state; status requires read_status.
+  rpc WatchState (WatchStateRequest) returns (stream SystemState);
+  rpc WatchStatus (WatchStatusRequest) returns (stream SystemStatus);
+  rpc WatchMessages (WatchMessagesRequest) returns (stream MessageItem);
+  rpc WatchAuditEvents (WatchAuditEventsRequest) returns (stream AuditEventItem);
+  rpc WatchM7Errors (WatchM7ErrorsRequest) returns (stream M7ErrorItem);
+}
