@@ -45,6 +45,8 @@ cp config.yml.dist config.yml
 
 > [!CAUTION]
 > The `totp` field is the **base32 secret**, not a generated 6-digit code. Voltnir derives the time-based code from it at login. Do not paste a code that will expire in 30 seconds.
+>
+>  The two credentials sit at **different layers**: the AMQP broker connection authenticates with `user_id` + `password` exactly as written, and the M7 session on top of it authenticates with the generated code. The code is **not** appended to the password.
 
 ## epex_settings
 
@@ -96,8 +98,8 @@ EPEX M7 connectivity: TLS client identity, M7 identifiers, the `environment` sel
 | `account_id` | string | yes | — | M7 account identifier used for order submission and session auth. |
 | `environment` | `sim` \| `prod` | yes | — | EPEX environment this gateway runs in. **Selects the M7 endpoints** (host/port/virtual_host for both AMQP and WebSocket) and must be permitted by the license's `environment`; a mismatch **refuses startup**. No default; an absent value fails config parsing. |
 | `user_id` | string | yes | — | AMQP login username. |
-| `password` | string | yes | — | Static component of the AMQP password; a TOTP code is appended at login. |
-| `totp` | string | yes | — | Base32-encoded TOTP secret. Not a 6-digit code; the code is generated from it. |
+| `password` | string | yes | — | AMQP login password, used verbatim in the broker connection. The TOTP code is **not** appended to it. |
+| `totp` | string | yes | — | Base32-encoded TOTP secret. Not a 6-digit code; a code is generated from it per connect and sent as the session login's `authVerificationCode`. |
 | `extra_ca_path` | path | no | — | Optional PEM bundle of extra trust roots, layered **additively** on top of the bundled CA set + OS native store for **both** the AMQP and WebSocket dials. See the TLS-trust callout below. |
 
 > [!NOTE]
@@ -117,7 +119,7 @@ epex_connection:
   account_id:     "<REPLACE_ME_ACCOUNT_ID>"
   environment: prod
   user_id:  "<REPLACE_ME_AMQP_USER>"
-  password: "<REPLACE_ME_AMQP_STATIC_PASSWORD>"
+  password: "<REPLACE_ME_AMQP_PASSWORD>"
   totp:     "<REPLACE_ME_TOTP_BASE32_SECRET>"
   # extra_ca_path: "./cert/corporate-ca.pem"  # optional, extra trust roots (private/corporate CA)
 ```
@@ -380,7 +382,7 @@ epex_connection:
   account_id:     "<REPLACE_ME_ACCOUNT_ID>"
   environment: prod
   user_id:  "<REPLACE_ME_AMQP_USER>"
-  password: "<REPLACE_ME_AMQP_STATIC_PASSWORD>"
+  password: "<REPLACE_ME_AMQP_PASSWORD>"
   totp:     "<REPLACE_ME_TOTP_BASE32_SECRET>"
   # extra_ca_path: "./cert/corporate-ca.pem"  # optional, extra trust roots (private/corporate CA)
 
