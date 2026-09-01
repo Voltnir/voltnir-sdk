@@ -1951,7 +1951,7 @@ Query the **compliance audit-event log**: the append-only, who-did-what record o
 | Param | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cursor` | `string` | No | Opaque pagination token from the previous `next_cursor`. Omit for the first page. |
-| `limit` | `u32` | No | Page size. Default: `50`, max: `200`. An explicit `limit=0` is rejected with 400. |
+| `limit` | `u32` | No | Page size. Default: `50`, max: `200`. An explicit `limit=0` is rejected with 400. (gRPC documents `0 == default` instead; proto3 cannot see the difference.) |
 | `date_from` | `string` | No | RFC 3339 datetime: inclusive lower bound on event time. |
 | `date_to` | `string` | No | RFC 3339 datetime: inclusive upper bound on event time. |
 | `action` | `string` | No | Filter by action token, e.g. `permissions_set`, `member_modified`, `position_limit_set`, `cash_limit_set`, `trading_toggled`, `self_trade_policy_changed`, `order_rejected`, `order_cancel_all`, `report_exported`, `system_startup`, `license_expired`. |
@@ -2008,7 +2008,7 @@ Query the **M7 exchange-error log**, the append-only record of M7-side faults ob
 | Param | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cursor` | `string` | No | Opaque pagination token from the previous `next_cursor`. Omit for the first page. |
-| `limit` | `u32` | No | Page size. Default: `50`, max: `200`. An explicit `limit=0` is rejected with 400. |
+| `limit` | `u32` | No | Page size. Default: `50`, max: `200`. An explicit `limit=0` is rejected with 400. (gRPC documents `0 == default` instead; proto3 cannot see the difference.) |
 | `date_from` | `string` | No | RFC 3339 datetime: inclusive lower bound on receive time. |
 | `date_to` | `string` | No | RFC 3339 datetime: inclusive upper bound on receive time. |
 | `kind` | `string` | No | Filter by fault class: `err_resp`, `parse_error`, `unknown_type`, `ack_uncorrelated`, `seq_gap`. |

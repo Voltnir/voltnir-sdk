@@ -1510,7 +1510,7 @@ Page through the **compliance audit-event log**: the append-only who-did-what re
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cursor` | `string` | No | `""` on the first page; pass back the previous response's `next_cursor`. |
-| `limit` | `uint32` | No | Page size. `0` (or unset) == default `50`; capped at `200`. |
+| `limit` | `uint32` | No | Page size. `0` (or unset) == default `50`; capped at `200`. (REST rejects an explicit `limit=0` with 400 instead, since proto3 cannot distinguish unset from 0.) |
 | `date_from` / `date_to` | `string` | No | RFC 3339: inclusive window. `""` = unbounded. |
 | `action` | `string` | No | Action token filter, e.g. `permissions_set`, `order_rejected`, `trading_toggled`. |
 | `target_type` | `string` | No | Target-kind filter: `user`, `member`, `profile`, `order`, `trading`, `report`, `license`, `system`. |
@@ -1540,7 +1540,7 @@ Page through the **M7 exchange-error log**: the append-only record of M7-side fa
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `cursor` | `string` | No | `""` on the first page; pass back the previous response's `next_cursor`. |
-| `limit` | `uint32` | No | Page size. `0` (or unset) == default `50`; capped at `200`. |
+| `limit` | `uint32` | No | Page size. `0` (or unset) == default `50`; capped at `200`. (REST rejects an explicit `limit=0` with 400 instead, since proto3 cannot distinguish unset from 0.) |
 | `date_from` / `date_to` | `string` | No | RFC 3339: inclusive window on receive time. `""` = unbounded. |
 | `kind` | `string` | No | Fault-class filter: `err_resp`, `unknown_type`, `ack_uncorrelated`, `seq_gap`. |
 | `category` | `string` | No | DFS200 §4 section filter: `order_entry`, `general`, `trade`, `user_right`, `limits`, `wrong_reference`, `unknown`. |
