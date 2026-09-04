@@ -990,11 +990,22 @@ class VoltnirClient:
             "WatchTrades", pb2.WatchTradesRequest(), timeout=timeout
         )
 
-    def watch_public_trades(self, *, timeout: float | None = None) -> Iterator[pb2.PublicTrade]:
+    def watch_public_trades(
+        self,
+        *,
+        contract_ids: Sequence[int] = (),
+        timeout: float | None = None,
+    ) -> Iterator[pb2.PublicTrade]:
         """Watch the public trade tape: `PublicTrade` events only, no
-        snapshot. Seed history via `list_public_trades()`."""
+        snapshot. Seed history via `list_public_trades()`.
+
+        `contract_ids` scopes the stream to the contracts named; the server
+        drops every other print before it reaches the wire. Empty is the
+        market-wide tape."""
         return self._stream(
-            "WatchPublicTrades", pb2.WatchPublicTradesRequest(), timeout=timeout
+            "WatchPublicTrades",
+            pb2.WatchPublicTradesRequest(contract_ids=contract_ids),
+            timeout=timeout,
         )
 
     def watch_pnl(

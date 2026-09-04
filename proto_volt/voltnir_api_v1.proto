@@ -1335,10 +1335,17 @@ message TradeEvent {
   repeated OwnTrade trades = 2;
 }
 
-// Subscribe to the market-wide public trade tape. Authenticated; no permission
-// required (matches ListPublicTrades). No snapshot: each message is one live
-// public trade as it arrives; clients filter by contract_id / area_id inline.
-message WatchPublicTradesRequest {}
+// Subscribe to the public trade tape. Authenticated; no permission required
+// (matches ListPublicTrades). No snapshot: each message is one live public
+// trade as it arrives.
+message WatchPublicTradesRequest {
+  // Contracts whose prints the stream should carry. Empty == the market-wide
+  // tape, so a client that sets nothing sees every print. Naming the contracts
+  // you plot moves the filter to the fan-out point: the prints you would
+  // discard never reach the wire. Mirrors the WS `public_trades` subscribe's
+  // `contract_ids`.
+  repeated uint64 contract_ids = 1;
+}
 
 // Subscribe to the caller's derived P&L. Authenticated; member-scoped like
 // GetPnl. The stream emits an immediate PnlSnapshot then a fresh one each

@@ -1559,8 +1559,10 @@ class TradeEvent(_message.Message):
     def __init__(self, type: _Optional[_Union[TradeEvent.EventType, str]] = ..., trades: _Optional[_Iterable[_Union[OwnTrade, _Mapping]]] = ...) -> None: ...
 
 class WatchPublicTradesRequest(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("contract_ids",)
+    CONTRACT_IDS_FIELD_NUMBER: _ClassVar[int]
+    contract_ids: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, contract_ids: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class WatchPnlRequest(_message.Message):
     __slots__ = ("v_member_short_id",)

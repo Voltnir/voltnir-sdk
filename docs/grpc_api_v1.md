@@ -1721,11 +1721,17 @@ Live push stream of the caller's filled trades, the gRPC mirror of the WS `trade
 
 `Iterator[TradeEvent]`: `type` ∈ {`SNAPSHOT`, `UPSERTED`}; `trades` carries the full list on `SNAPSHOT`, exactly one on `UPSERTED`.
 
-### `Server Stream` `client.watch_public_trades()`
+### `Server Stream` `client.watch_public_trades(contract_ids=())`
 
 _Permission: (authenticated)_
 
-Live market-wide public trade tape, mirror of the WS `public_trades` stream. No snapshot (seed history via `list_public_trades`); each message is one live `PublicTrade`. Filter by `contract_id`/`area_id` client-side. A lagged broadcast skips missed prints (re-request per-contract history to recover).
+Live public trade tape, mirror of the WS `public_trades` stream. No snapshot (seed history via `list_public_trades`); each message is one live `PublicTrade`. A lagged broadcast skips missed prints (re-request per-contract history to recover).
+
+#### Arguments
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `contract_ids` | `repeated uint64` | No | Contracts whose prints the stream carries. Filtered server-side, so prints on other contracts never reach the wire. Empty = the market-wide tape. |
 
 #### Returns
 

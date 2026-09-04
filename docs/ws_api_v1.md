@@ -147,6 +147,8 @@ Subscribe and unsubscribe with control messages. A successful subscribe gets no 
 ```json
 {"action": "subscribe", "stream": "<name>"}     // contracts also takes
                                                 //   "areas": [...], "products": [...]
+                                                // public_trades also takes
+                                                //   "contract_ids": [...]
 {"action": "unsubscribe", "stream": "<name>"}
 ```
 
@@ -278,13 +280,19 @@ The *subscribe* snapshot includes each contract's `last_history` trend-chip pref
 
 _no permission_
 
-Market-wide public trade tape (raw). There is no snapshot: the first frame after subscribe is an empty confirmation; seed per-contract history via [`public_trades_for_contract`](#cmd-public_trades_for_contract), then live deltas follow. Filter by `contract_id` client-side.
+Public trade tape (raw) for the subscribed `contract_ids`. There is no snapshot: the first frame after subscribe is an empty confirmation; seed per-contract history via [`public_trades_for_contract`](#cmd-public_trades_for_contract), then live deltas follow.
 
-#### Frame
+#### Example
 
-```json
+```
+// subscribe scoped to the contracts you plot
+{"action": "subscribe", "stream": "public_trades", "contract_ids": [12345]}
+
+// frame
 {"stream": "public_trades", "deltas": [PublicTrade…], "sent_at_ms": 1718…}
 ```
+
+**`contract_ids` filters server-side.** Prints on other contracts are dropped before they are serialised, so a client that names the contracts it plots pays for nothing else. The field is optional: omitting it — or sending an empty list — subscribes to the whole market's tape. A second `subscribe` on `public_trades` replaces the active filter; deltas buffered under the previous one are discarded rather than delivered.
 
 ### `Stream` `trade_tape`
 

@@ -87,6 +87,7 @@ _OVERRIDES = {
     "get_pnl": {"v_member_short_id": "VM001"},
     "list_public_trades": {"limit": 5, "area_id": "10YBE----------2"},
     "watch_orders": {"delivery_area": "10YBE----------2"},
+    "watch_public_trades": {"contract_ids": [42]},
     "watch_pnl": {"v_member_short_id": "VM001"},
     "query_audit_orders": {"limit": 5},
     "query_audit_trades": {"limit": 5},
@@ -617,10 +618,29 @@ def test_watch_stream_error_translates(client, fake, method, code, exc):
 
 
 def test_watch_pnl_passes_member_filter(client, fake):
-    # Edge: the one Watch* RPC with a request field forwards it.
     fake.stream_count = 1
     list(client.watch_pnl(v_member_short_id="VM001", timeout=5.0))
     assert fake.requests["WatchPnl"].v_member_short_id == "VM001"
+
+
+def test_watch_public_trades_passes_contract_scope(client, fake):
+    fake.stream_count = 1
+    list(client.watch_public_trades(contract_ids=[42, 43], timeout=5.0))
+    assert list(fake.requests["WatchPublicTrades"].contract_ids) == [42, 43]
+
+
+def test_watch_public_trades_unscoped_by_default(client, fake):
+    # Empty is the market-wide tape, so the default must send no ids rather
+    # than a filter that matches nothing.
+    fake.stream_count = 1
+    list(client.watch_public_trades(timeout=5.0))
+    assert list(fake.requests["WatchPublicTrades"].contract_ids) == []
+
+
+def test_watch_public_trades_rejects_a_non_integer_contract_id(client, fake):
+    fake.stream_count = 1
+    with pytest.raises(TypeError):
+        list(client.watch_public_trades(contract_ids=["42"], timeout=5.0))
 
 
 def test_watch_orders_passes_all_three_filters(client, fake):
