@@ -152,6 +152,19 @@ class FakeVoltAPI(pb2_grpc.VoltAPIServicer):
             total_hint=1,
         )
 
+    def ListExchangeMessages(self, request, context):
+        self._record("ListExchangeMessages", request, context)
+        self._maybe_abort(context)
+        return pb2.ListExchangeMessagesResponse(
+            items=[
+                pb2.ExchangeMessageItem(
+                    json='{"msg_id":90210,"code":158,"severity":"error"}'
+                )
+            ],
+            next_cursor="c1",
+            total_hint=1,
+        )
+
 
 def _make_unary(method_name: str, out_cls):
     def handler(self, request, context):

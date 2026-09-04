@@ -5,7 +5,7 @@ Exercises all 63 RPCs the service declares against a live Voltnir server and
 prints [PASS]/[FAIL]/[SKIP] per step. Mirrors the parent repo's `bin/test_grpc`
 runner: a single linear script, no test framework.
 
-"All 63" is enforced, not asserted by hand. This runner is linear and
+"All 65" is enforced, not asserted by hand. This runner is linear and
 hand-written, so unlike the descriptor-driven offline suite it cannot notice a
 new RPC by itself. Two guards close that: every call the clients make is
 recorded (see `_CallRecorder`) and the run ends with a coverage line naming any
@@ -63,6 +63,7 @@ from voltnir_sdk import (
     ContractState,
     DeadlineExceeded,
     ExportFormat,
+    InvalidArgument,
     ModifyAction,
     OrderType,
     PermissionDenied,
@@ -269,14 +270,23 @@ def run_sync_readonly(client: VoltnirClient, area: str, watch_events: int) -> Re
     step(r, "GetThrottling", client.get_throttling)
     step(r, "GetSystemInfo", client.get_system_info)
     step(r, "GetContractLimit", client.get_contract_limit)
-    step(r, "GetCashLimit", client.get_cash_limit)
-
-    # ECC fail-closed switch: when enabled, a 0/unset cash limit means "no
-    # trading in that pool" rather than "limit disabled". Read-only here; the
-    # restore round-trip is in the operator pass.
-    cfc = step(r, "GetCashFailClosed", client.get_cash_fail_closed)
-    if cfc is not None:
-        print(f"      enabled={cfc.enabled}")
+    # Both cash pools: the exchange's limit for the desk, what it still has
+    # available, the Voltnir cap, and the effective House limit every check
+    # uses. A pool the exchange has not reported reads as zero, which is what
+    # stops trading there.
+    cl = step(r, "GetCashLimit", client.get_cash_limit)
+    if cl is not None:
+        for name, pool in (("eur", cl.eur), ("gbp", cl.gbp)):
+            cap = pool.cap_cents.value if pool.HasField("cap_cents") else None
+            ecc = (
+                pool.ecc_limit_cents.value
+                if pool.HasField("ecc_limit_cents")
+                else None
+            )
+            print(
+                f"      {name}: ecc={ecc} cap={cap} house={pool.house_cents}"
+                f" breached={pool.breached}"
+            )
 
     # Both ECC bank-holiday calendars. Authenticated, no permission required.
     hol = step(r, "GetHolidays", client.get_holidays)
@@ -334,9 +344,17 @@ def run_sync_readonly(client: VoltnirClient, area: str, watch_events: int) -> Re
         contract_id = c.contract_id
         contract_prod = c.prod
         contract_dlvry = c.dlvry_start
+        # `ref_px_cents` uses proto3 field presence, so HasField is the only
+        # way to tell "no reference price" from a real price of 0.
+        ref_px = (
+            f"{c.ref_px_cents} ({c.ref_px_type or '?'})"
+            if c.HasField("ref_px_cents")
+            else "none"
+        )
         print(
             f"      {len(contracts.contracts)} contracts; "
-            f"picked id={contract_id} prod={contract_prod!r} start={contract_dlvry!r}"
+            f"picked id={contract_id} prod={contract_prod!r} start={contract_dlvry!r} "
+            f"ref_px={ref_px}"
         )
 
     if contract_id:
@@ -404,13 +422,18 @@ def run_sync_readonly(client: VoltnirClient, area: str, watch_events: int) -> Re
             if um is not None:
                 print(f"      member_ids={len(um.member_ids)}")
 
-    # Audit / M7-error queries gated on permission (read_audit / read_m7_errors).
+    # Audit / M7-error / exchange-message queries gated on permission
+    # (read_audit / read_m7_errors; the exchange-message log shares the latter).
     for name, call in (
         ("QueryAuditOrders", lambda: client.query_audit_orders(limit=5)),
         ("QueryAuditTrades", lambda: client.query_audit_trades(limit=5)),
         ("QueryAuditPublicTrades", lambda: client.query_audit_public_trades(limit=5)),
         ("QueryAuditEvents", lambda: client.query_audit_events(limit=5)),
         ("QueryM7Errors", lambda: client.query_m7_errors(limit=5)),
+        (
+            "ListExchangeMessages",
+            lambda: client.list_exchange_messages(limit=5),
+        ),
     ):
         try:
             out = call()
@@ -516,6 +539,11 @@ def run_sync_readonly(client: VoltnirClient, area: str, watch_events: int) -> Re
         r, "WatchAuditEvents", lambda: client.watch_audit_events(timeout=5.0)
     )
     subscribe_smoke(r, "WatchM7Errors", lambda: client.watch_m7_errors(timeout=5.0))
+    subscribe_smoke(
+        r,
+        "WatchExchangeMessages",
+        lambda: client.watch_exchange_messages(timeout=5.0),
+    )
 
     # Streaming smoke: WatchContract first event must be SNAPSHOT and
     # every event type must be in the declared vocabulary. Bounded by a
@@ -577,6 +605,38 @@ def _dlvry_start_is_safely_ahead(dlvry_start: str, margin_min: int = 20) -> bool
     except ValueError:
         return False
     return start >= datetime.now(timezone.utc) + timedelta(minutes=margin_min)
+
+
+class _CapRestore:
+    """Lift the Voltnir cash cap for a probe and put it back afterwards.
+
+    The desk's cash limit is the exchange's and cannot be raised — the cap is
+    the only writable half, and it only ever tightens. A fresh install has no
+    cap at all, in which case there is nothing to lift and nothing to restore.
+    Best-effort throughout: this is setup for a smoke run on a throwaway sim,
+    so a failure is warned about rather than aborting.
+    """
+
+    def __init__(self, client: VoltnirClient) -> None:
+        self._client = client
+        self._prior: int | None = None
+        self._had_cap = False
+
+    def release(self) -> None:
+        pool = self._client.get_cash_limit().eur
+        if not pool.HasField("cap_cents"):
+            return
+        self._prior = pool.cap_cents.value
+        self._had_cap = True
+        self._client.set_cash_limit(cap_cents=None, currency="eur")
+
+    def restore(self) -> None:
+        if not self._had_cap:
+            return
+        try:
+            self._client.set_cash_limit(cap_cents=self._prior, currency="eur")
+        except Exception as e:  # noqa: BLE001 (best-effort restore)
+            print(f"      (warning: could not restore cash cap: {e})")
 
 
 def _find_active_contract(
@@ -643,17 +703,14 @@ def run_sync_mutate(client: VoltnirClient, area: str) -> Result:
     # order trips "position limit exceeded". Raise it for the lifecycle and
     # restore the prior value before returning (no net operator-state change).
     prior_pos_limit = None
-    prior_cash_cents = None
+    prior_cap = _CapRestore(client)
     try:
         prior_pos_limit = client.get_contract_limit().quantity
         client.set_contract_limit(quantity=1_000_000_000)
-        # A fresh DB also seeds the ECC fail-closed cash default (a 0/unset
-        # cash limit means "no trading"), so the order also trips "cash limit
-        # exceeded". Set a generous EUR House limit for the lifecycle and
-        # restore the prior value after, keeping the fail-closed guard on,
-        # the real operator workflow rather than disabling the guard.
-        prior_cash_cents = client.get_cash_limit().cents
-        client.set_cash_limit(cents=1_000_000_000_000, currency="eur")
+        # The desk's cash limit comes from the exchange; the only lever here is
+        # the Voltnir cap, which can only tighten it. Lift any standing cap for
+        # the lifecycle and put it back after — the real operator workflow.
+        prior_cap.release()
     except Exception as e:  # noqa: BLE001 (best-effort setup on a throwaway sim)
         print(f"      (warning: could not relax order limits: {e})")
 
@@ -663,11 +720,7 @@ def run_sync_mutate(client: VoltnirClient, area: str) -> Result:
                 client.set_contract_limit(quantity=prior_pos_limit)
             except Exception as e:  # noqa: BLE001 (best-effort restore)
                 print(f"      (warning: could not restore position limit: {e})")
-        if prior_cash_cents is not None:
-            try:
-                client.set_cash_limit(cents=prior_cash_cents, currency="eur")
-            except Exception as e:  # noqa: BLE001 (best-effort restore)
-                print(f"      (warning: could not restore cash limit: {e})")
+        prior_cap.restore()
 
     submit = step(
         r,
@@ -773,22 +826,21 @@ def run_sync_mutate(client: VoltnirClient, area: str) -> Result:
 
 
 def _relax_order_limits(client: VoltnirClient):
-    """Raise the position and cash limits for a probe, returning a restorer.
+    """Relax the position limit and the cash cap for a probe, returning a
+    restorer.
 
-    A fresh DB seeds a tiny order position limit and an ECC fail-closed cash
-    default (a 0/unset limit means "no trading"), so even a 0.1 MW hibernated
-    order trips both. Raise them for the duration and put the prior values back,
-    keeping the fail-closed guard ON: the real operator workflow, not disabling
-    the guard. Best-effort on a throwaway sim; failures are warned about rather
-    than aborting the run.
+    A fresh DB seeds a tiny order position limit, so even a 0.1 MW hibernated
+    order trips it. The cash limit is the exchange's and cannot be raised at
+    all; only a standing Voltnir cap can be lifted. Both are put back after —
+    the real operator workflow, never disabling the guard. Best-effort on a
+    throwaway sim; failures are warned about rather than aborting the run.
     """
     prior_pos = None
-    prior_cash = None
+    prior_cap = _CapRestore(client)
     try:
         prior_pos = client.get_contract_limit().quantity
         client.set_contract_limit(quantity=1_000_000_000)
-        prior_cash = client.get_cash_limit().cents
-        client.set_cash_limit(cents=1_000_000_000_000, currency="eur")
+        prior_cap.release()
     except Exception as e:  # noqa: BLE001 (best-effort setup)
         print(f"      (warning: could not relax order limits: {e})")
 
@@ -798,11 +850,7 @@ def _relax_order_limits(client: VoltnirClient):
                 client.set_contract_limit(quantity=prior_pos)
             except Exception as e:  # noqa: BLE001 (best-effort restore)
                 print(f"      (warning: could not restore position limit: {e})")
-        if prior_cash is not None:
-            try:
-                client.set_cash_limit(cents=prior_cash, currency="eur")
-            except Exception as e:  # noqa: BLE001 (best-effort restore)
-                print(f"      (warning: could not restore cash limit: {e})")
+        prior_cap.restore()
 
     return _restore
 
@@ -1089,12 +1137,15 @@ def run_sync_operator(client: VoltnirClient) -> Result:
             lambda: client.set_contract_limit(quantity=cl.quantity),
         )
 
+    # The cap is the only writable half — the House limit itself comes from the
+    # exchange. Write back exactly what was read, including "no cap".
     ca = step(r, "GetCashLimit", client.get_cash_limit)
     if ca is not None:
+        eur_cap = ca.eur.cap_cents.value if ca.eur.HasField("cap_cents") else None
         gated(
             r,
-            "SetCashLimit (restore EUR)",
-            lambda: client.set_cash_limit(cents=ca.cents, currency="eur"),
+            "SetCashLimit (restore EUR cap)",
+            lambda: client.set_cash_limit(cap_cents=eur_cap, currency="eur"),
         )
 
     ta = step(r, "GetTradingAllowed", client.get_trading_allowed)
@@ -1103,14 +1154,6 @@ def run_sync_operator(client: VoltnirClient) -> Result:
             r,
             "SetTradingAllowed (restore)",
             lambda: client.set_trading_allowed(allowed=ta.allowed),
-        )
-
-    cfc = step(r, "GetCashFailClosed", client.get_cash_fail_closed)
-    if cfc is not None:
-        gated(
-            r,
-            "SetCashFailClosed (restore)",
-            lambda: client.set_cash_fail_closed(enabled=cfc.enabled),
         )
 
     # Holiday calendars. Two different restore shapes:
@@ -1238,6 +1281,35 @@ def run_sync_member_lifecycle(client: VoltnirClient) -> Result:
         # this runner.
         skip(r, "PatchMember (deactivate)", "CreateMember returned no id")
         return r
+
+    # A member's cash limit is its ALLOCATION out of the desk's limit, and the
+    # allocations of all members sum to at most that limit. Asking for more than
+    # the desk holds is refused before anything is written — the guarantee that
+    # one member can never spend another's allocation rests on this check, so
+    # the run confirms it is actually enforced rather than assuming it.
+    label = "PatchMember (allocation over the desk limit is refused)"
+    print(f"  → {label} ... ", end="", flush=True)
+    pool = client.get_cash_limit().eur
+    over = pool.house_cents + 1
+    try:
+        client.patch_member(id=member.id, cash_limit_cents=over)
+    except InvalidArgument as e:
+        print(f"[PASS] {e.message}")
+        r.passed += 1
+    except PermissionDenied:
+        print("[SKIP] permission not granted")
+        r.skipped += 1
+    except VoltnirError as e:
+        print(f"[FAIL] wrong status {e.code.name}: {e.message}")
+        r.failed += 1
+        r.failures.append(f"{label}: {e.code.name}: {e.message}")
+    else:
+        print("[FAIL] accepted")
+        r.failed += 1
+        r.failures.append(
+            f"{label}: accepted {over} cents against a {pool.house_cents} "
+            "cents House limit"
+        )
 
     # Plain `False`, not BoolValue(value=False): the SDK wraps it now, so the
     # caller no longer needs to know the wire uses google.protobuf wrappers.

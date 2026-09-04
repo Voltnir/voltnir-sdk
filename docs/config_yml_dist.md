@@ -34,7 +34,7 @@ cp config.yml.dist config.yml
 | `market_data` | no | High-volume capture of the public trade tape + order book frames. Each stream opts in via `persist` (`false`/`postgresql`/`parquet`). |
 | `licensing` | no* | License file path. **Section optional, but a valid license is required at startup.* |
 | `self_trade` | no | Self-trade (cross-trade) prevention policy. Defaults to `observe`. |
-| `cash_limit` | no | Cash-limit currency methodology (GBP delivery areas + per-MWh sell reservation). Defaults to EUR netting everywhere. |
+| `cash_limit` | no | Which delivery areas settle in ECC's GBP pool, the exposure-window timezone, and the fallback GB delivery-risk rate used until the exchange publishes its risk set. Exposure itself comes from the exchange's risk parameters. |
 
 ## Secrets & Safety
 
@@ -218,6 +218,7 @@ Selects where orders, trades, users, and the audit trail are persisted. Optional
 | `max_connections` | int | no | `4` | Connection-pool size (both backends). |
 | `audit_retention_days` | int | no | `7` | Days to retain compliance audit-event rows before the hourly prune task deletes them. `0` = keep forever. Both backends. Negative values are rejected at startup. |
 | `m7_errors_retention_days` | int | no | `7` | Days to retain M7 exchange-error rows before the hourly prune task deletes them. `0` = keep forever. Both backends. Negative values are rejected at startup. |
+| `exchange_messages_retention_days` | int | no | `90` | Days to retain exchange-message rows (what the exchange said: cash-limit breaches, halts, suspensions, failover notices) before the hourly prune task deletes them. `0` = keep forever. Both backends. Negative values are rejected at startup. Longer than the M7-error window by default: the message log is the narrative an operator reconstructs an incident from weeks later. |
 
 > [!NOTE]
 > Omitting `database` entirely keeps the historical behavior: the embedded SQLite store at `./voltnir.db`.
@@ -242,6 +243,7 @@ database:
   # Retention (both backends; hourly prune, 0 = keep forever):
   # audit_retention_days: 7
   # m7_errors_retention_days: 7
+  # exchange_messages_retention_days: 90
 ```
 
 ## market_data
@@ -332,26 +334,28 @@ self_trade:
 
 Cash-limit risk-engine settings. The cash limit caps the monetary value at risk (open orders + windowed executed trades) and is enforced alongside the MW position limit. The limit *values* are runtime-mutable (global via `GET/PUT /api/v1/cash_limit`; per-member via the member endpoints). Only the static settings below live here. The section is optional.
 
-**Two separate pools, EUR and GBP** (ECC settles them separately: no cross-currency netting, no FX); a leg is bucketed by delivery area. For both pools an open order's exposure is floored at zero (a money-making order contributes nothing, never a credit; a negative-price sell consumes), while executed trades move the limit by their full signed value. Values scale with the contract's delivery duration (energy = MW × hours), so a 15-min product counts a quarter of the same MW/price hourly product. The pools differ only in the **sell** methodology: an **EUR** sell credits (receipt counted), while a **GBP** sell's receipt is *ignored* (ECC) and instead reserves a fixed rate per MWh. Buys consume normally in both.
+**Two separate pools, EUR and GBP** (ECC settles them separately: no cross-currency netting, no FX); a leg is bucketed by delivery area. **How much a leg consumes comes from the exchange's own risk set** for the contract's product and delivery area — eight price-dependent `a` parameters and four price-independent `alpha` parameters, giving `a[case] × signed price × MWh + alpha[case] × MWh`, with the case chosen by side, price sign, and order versus trade. An open order's exposure is floored at zero (a money-making order contributes nothing, never a credit), and every figure scales with the contract's delivery duration (energy = MW × hours), so a 15-min product counts a quarter of the same MW/price hourly product.
+
+On the exchange's default risk set that is ECC RM R55 §3.11 exactly: a positive-price buy consumes its value, a trade moves the limit by its full signed value, and the risk-free order cases (sell at a positive price, buy at a negative price) cost nothing. A GB delivery area is assigned a risk set whose `alpha` **sell** value is ECC's GB delivery-risk parameter, which is why §3.12 says GB sells also decrease the limit.
+
+**The two GBP settings below are a fallback, not the methodology.** They price a GBP delivery area only while the exchange has published no risk set for the contract's product — a late or missing product report — and are ignored once it has. A non-GBP area with no risk set falls back to ECC's EUR rules instead. Taking either fallback is logged, once per delivery area for GBP.
 
 > [!WARNING]
-> **Default semantics.** Voltnir defaults to ECC fail-closed parity (`fail_closed: true`): a `0`/unset cash limit means **zero = no trading** in that pool (ECC Risk Management Services §3.11 EUR / §3.12 GBP), so a fresh install is guarded out of the box and a real limit must be set to trade. Set `fail_closed: false` (or flip it at runtime via `GET/PUT /api/v1/cash_fail_closed`) to opt back into Voltnir's historical fail-*open* semantics, intended for a simulator or non-ECC deployment: a `0` cash limit is then **disabled**, that pool *unbounded* with no Voltnir-side guardrail. **Migration:** this value only *seeds* a fresh profile row, so an install created under the old fail-open default keeps it until the runtime switch is flipped; upgrading never silently halts an existing deployment. At startup, when a cash limit is in force but the ECC parameters look unconfigured (GBP areas with no reservation rate, empty holiday calendar, or a non-Amsterdam timezone), the gateway logs a warning; it never refuses to start over these.
+> **The desk's cash limit comes from the exchange, not from this file.** ECC gives the Trading Participant a Cash Limit per settlement currency (ECC Risk Management Services §3.11 EUR / §3.12 GBP) and M7 reports it to the gateway. An operator can add a **cap** via `GET/PUT /api/v1/cash_limit` to trade more conservatively than ECC allows; the limit in force is `min(ECC limit, cap)`, and a cap above the ECC limit is rejected, never clamped. There is no fail-open mode: a limit of zero — including an ECC limit that has not been reported yet — means **no trading** in that pool, which is what ECC says it means. A leftover `fail_closed:` key here is ignored. At startup, and again whenever the exchange reports a GBP limit, the gateway warns when the ECC parameters look unconfigured (a GBP limit with no reservation rate, an empty holiday calendar, or a non-Amsterdam timezone); it never refuses to start over these.
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `fail_closed` | bool | no | `true` | ECC fail-closed parity (**seed** for the runtime switch). `true` (default) is ECC §3.11/§3.12: a `0`/unset cash limit = **no trading** in that pool, so a fresh install is guarded out of the box. `false` opts into Voltnir's historical semantics: a `0` cash limit = *disabled* (pool unbounded), for a simulator or non-ECC deployment. Seeds the profile row on first boot only; the live switch is runtime-mutable via `GET/PUT /api/v1/cash_fail_closed` (and the gRPC/WS mirrors) and an existing row wins on later boots, exactly like `self_trade.policy`, so upgrading never silently halts an install created under the old fail-open default. |
-| `gbp_delivery_areas` | list | no | `[]` | **Extra** delivery-area EICs that settle in GBP (ECC's GBP pool + methodology), unioned with the always-on built-in GB area (`10YGB----------A`). Empty (default) = Great Britain settles GBP, every other area settles EUR. Add an EIC here only if ECC starts settling a further zone in GBP. |
-| `gbp_sell_reservation_per_mwh_cents` | i64 | no | `0` | Flat GBP sell-reservation rate, in GBP cents per MWh. Used when `gbp_sell_reservation_schedule` is empty (or no scheduled rate is yet effective). `0` reserves nothing. This is ECC's *GB Price Independent Delivery Risk Parameter in GBP for Continuous Trading in M7 (Sell only)*, published in whole GBP per MWh — multiply by 100. It is a three-figure GBP/MWh number, not a single-digit one. |
-| `gbp_sell_reservation_schedule` | list | no | `[]` | Effective-dated GBP reservation rates. ECC revises the rate ~monthly, announced ~a week ahead. Each entry is `{ effective_from: "YYYY-MM-DD", rate_per_mwh_cents: N }`. A revised rate applies **at the 16:00 reset** on its `effective_from`, not from midnight — so the rate in force is the entry with the latest `effective_from` on or before the date of the *current window's* 16:00 reset (in `exposure_window_timezone`); before any is effective, the flat rate above is used. An `effective_from` that falls on a weekend or a TARGET2 closing day gets no reset of its own and takes hold at the first reset on or after it. An **incomplete** extract of ECC's 2026 values, from Clearing Circulars 04/2026, 54/2026 and 58/2026, showing the real magnitude — do not copy it as a configuration: `{ effective_from: "2026-01-22", rate_per_mwh_cents: 9900 }`, `{ effective_from: "2026-08-03", rate_per_mwh_cents: 15100 }`, `{ effective_from: "2026-09-01", rate_per_mwh_cents: 15500 }` (99, 151 and 155 GBP/MWh). |
+| `gbp_delivery_areas` | list | no | `[]` | **Extra** delivery-area EICs that settle in ECC's GBP pool, unioned with the always-on built-in GB area (`10YGB----------A`). Empty (default) = Great Britain settles GBP, every other area settles EUR. Add an EIC here only if ECC starts settling a further zone in GBP. |
+| `gbp_sell_reservation_per_mwh_cents` | i64 | no | `0` | **Fallback only** — used for a GBP delivery area the exchange has published no risk set for. Flat GBP sell-reservation rate, in GBP cents per MWh, applied when `gbp_sell_reservation_schedule` is empty (or no scheduled rate is yet effective). `0` reserves nothing. This is ECC's *GB Price Independent Delivery Risk Parameter in GBP for Continuous Trading in M7 (Sell only)*, published in whole GBP per MWh — multiply by 100. It is a three-figure GBP/MWh number, not a single-digit one. It is the same quantity the exchange publishes as the GB risk set's `alpha` sell parameter, so set it to keep the gateway protected before that report arrives. |
+| `gbp_sell_reservation_schedule` | list | no | `[]` | **Fallback only**, same as the flat rate above. Effective-dated GBP reservation rates. ECC revises the rate ~monthly, announced ~a week ahead. Each entry is `{ effective_from: "YYYY-MM-DD", rate_per_mwh_cents: N }`. A revised rate applies **at the 16:00 reset** on its `effective_from`, not from midnight — so the rate in force is the entry with the latest `effective_from` on or before the date of the *current window's* 16:00 reset (in `exposure_window_timezone`); before any is effective, the flat rate above is used. An `effective_from` that falls on a weekend or a TARGET2 closing day gets no reset of its own and takes hold at the first reset on or after it. An **incomplete** extract of ECC's 2026 values, from Clearing Circulars 04/2026, 54/2026 and 58/2026, showing the real magnitude — do not copy it as a configuration: `{ effective_from: "2026-01-22", rate_per_mwh_cents: 9900 }`, `{ effective_from: "2026-08-03", rate_per_mwh_cents: 15100 }`, `{ effective_from: "2026-09-01", rate_per_mwh_cents: 15500 }` (99, 151 and 155 GBP/MWh). |
 | `exposure_window_timezone` | string | no | `"Europe/Amsterdam"` | IANA timezone for the exposure-window reset. ECC clears at **16:00 in this zone** each working day (a regulatory reference, not a user preference), so it defaults to `Europe/Amsterdam` (handles CET/CEST automatically). An unparseable value falls back to `Europe/Amsterdam` with a warning. |
 | Bank holidays for the exposure window are **no longer configured here**. They are runtime-managed (separate EUR and GBP calendars) via the `/api/v1/holidays` REST endpoint (and the gRPC / WS equivalents), persisted to the database, and reloaded on restart. After upgrading, re-enter any holiday dates through that endpoint. |  |  |  |  |
 
 > [!WARNING]
-> **Take the GBP reservation rate from the ECC Risk Parameter File.** The per-MWh figure is ECC's *GB Price Independent Delivery Risk Parameter for Continuous Trading in M7 (Sell only)*. ECC derives it monthly per Clearing Circular 25/2023 — `Roundup(GB imbalance cost ratio × FUBM front-month settlement price × GB intraday trading offset)` — announced about a week before the first business day of the month, with extra intra-month steps when the front-month price moves more than 10 %. The live value is published in the ECC Risk Parameter File on ECC's website; the schedule here is a local mirror of it and goes stale on ECC's cadence. Set it via `gbp_sell_reservation_schedule` (or the flat field) and confirm the exact value, the GBP-area list, and the currency basis before go-live.
+> **Take the fallback GBP reservation rate from the ECC Risk Parameter File.** The per-MWh figure is ECC's *GB Price Independent Delivery Risk Parameter for Continuous Trading in M7 (Sell only)*. ECC derives it monthly per Clearing Circular 25/2023 — `Roundup(GB imbalance cost ratio × FUBM front-month settlement price × GB intraday trading offset)` — announced about a week before the first business day of the month, with extra intra-month steps when the front-month price moves more than 10 %. The live value is published in the ECC Risk Parameter File on ECC's website; the schedule here is a local mirror of it and goes stale on ECC's cadence. Set it via `gbp_sell_reservation_schedule` (or the flat field) and confirm the exact value, the GBP-area list, and the currency basis before go-live.
 
 ```
 cash_limit:
-  fail_closed: true
   gbp_delivery_areas: []
   gbp_sell_reservation_per_mwh_cents: 0
   gbp_sell_reservation_schedule: []
@@ -411,8 +415,9 @@ trading_terminal:
 database:
   backend: internal
   path: "./voltnir.db"
-  # audit_retention_days: 7      # hourly prune; 0 = keep forever
-  # m7_errors_retention_days: 7  # hourly prune; 0 = keep forever
+  # audit_retention_days: 7               # hourly prune; 0 = keep forever
+  # m7_errors_retention_days: 7           # hourly prune; 0 = keep forever
+  # exchange_messages_retention_days: 90  # hourly prune; 0 = keep forever
 
 # market_data:                 # optional, high-volume capture (off by default)
 #   public_trades:
@@ -429,7 +434,6 @@ self_trade:
   policy: observe
 
 cash_limit:
-  fail_closed: true
   gbp_delivery_areas: []
   gbp_sell_reservation_per_mwh_cents: 0
   gbp_sell_reservation_schedule: []

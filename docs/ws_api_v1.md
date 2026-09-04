@@ -115,7 +115,7 @@ A failed command returns `ok: false` with an `error` object carrying the canonic
 | `NOT_FOUND` | 404 | NotFound | order / contract / user / member does not exist |
 | `CONFLICT` | 409 | Aborted | state conflict (not active, modify already in progress) |
 | `POSITION_LIMIT_EXCEEDED` | 422 | FailedPrecondition | order would breach the position limit |
-| `CASH_LIMIT_EXCEEDED` | 422 | FailedPrecondition | order would breach the Voltnir order cash limit (global or per-member pool) |
+| `CASH_LIMIT_EXCEEDED` | 422 | FailedPrecondition | the exposure the exchange's risk parameters put on this order would push consumed cash past one of the pool's bounds — the desk's House limit, the House remainder, the member's allocation, or what the exchange still has available — or the pool is already breached |
 | `SELF_CROSS_BLOCKED` | 422 | FailedPrecondition | order would cross your own resting order under reject policy |
 | `TRADING_DISABLED` | 422 | FailedPrecondition | operator kill-switch is engaged (`trading_allowed = false`); `new_order` and `modify_order` are rejected before reaching M7. Cancels (`delete_order` / `cancel_all_orders`) are not gated; they only reduce exposure |
 | `TIMEOUT` | 504 | DeadlineExceeded | exchange did not acknowledge in time |
@@ -218,7 +218,7 @@ The trading-posture aggregate, streamed. The streaming companion of the unary [`
  "license": {…}, "sent_at_ms": 1718…}
 ```
 
-`cash_limit` is the **Voltnir order cash limit**: the configured limit, current consumption, and remaining headroom per currency pool, in cents (`remaining = limit − consumed`; `*_limit_cents == 0` means that pool is not enforced). Distinct from `cash_limits`, the M7-reported margin feed. The *configured* limits alone are also queryable / settable one-shot via [`get_cash_limit`](#cmd-get_cash_limit) / [`set_cash_limit`](#cmd-set_cash_limit); this status frame additionally streams live consumption + remaining. Cash-limit order bounces arrive on the [`messages`](#stream-messages) stream as order-rejection entries.
+`cash_limit` is the **desk cash-limit state**: the effective House limit, current consumption, and remaining headroom per currency pool, in cents (`remaining = limit − consumed`; `*_limit_cents == 0` means no order may add exposure in that pool). `eur_pool` / `gbp_pool` carry where that limit came from — the ECC limit with its revision and effective date, what the exchange still has available, the operator cap, the allocation split (`allocated_cents` / `unallocated_cents`), and the `over_allocated` / `cap_above_ecc` / `breached` flags — in the same shape [`get_cash_limit`](#cmd-get_cash_limit) returns. Distinct from `cash_limits`, the raw M7-reported feed. Cash-limit order bounces arrive on the [`messages`](#stream-messages) stream as order-rejection entries.
 
 ### `Stream` `pnl`
 
@@ -272,6 +272,8 @@ Order book + contract metadata for the subscribed `{areas, products}`. Snapshot 
 **Filters are required in practice.** A contract is included only when its area is in `areas` *and* its product is in `products`. An empty set matches nothing, so subscribing without both filters yields an empty snapshot and no data. A second `subscribe` on `contracts` replaces the active filter (and re-sends a snapshot).
 
 The *subscribe* snapshot includes each contract's `last_history` trend-chip prefill. *Lag-recovery* snapshots omit it (kept small so a slow client can catch up), so treat `last_history` as optional and retain any prefill you already hold when it is absent.
+
+**Reference prices arrive on this stream.** Each `AreaContract` carries the exchange's reference price for the contract in its delivery area — `ref_px_cents`, `ref_px_type` (`"C"` closing, the exchange's default, or `"O"` opening), `ref_px_date` (`YYYY-MM-DD`) and `ref_px_updated_ms`. They are all `null` until the exchange publishes one, and a new or changed price is an ordinary `Upsert` delta with a bumped `version`, so no separate subscription is needed. A price that has not changed emits nothing. See the [REST units table](rest_api_v1.md#units) for the scale; `0` and negative are real prices, so `null` is the only "not reported".
 
 > [!CAUTION]
 > Each `AreaContract` carries `predefined`: `false` marks a **user-defined block** contract, where the exchange rejects regular limit orders (M7 error 1051, `"Can't enter OPEN order for user-defined blocks"`); only block orders are accepted. Do not offer regular order entry on a contract with `predefined: false`. `null` means metadata not yet received (not a block).
@@ -358,6 +360,25 @@ Live tail of the M7 exchange-error log. Same tail semantics as [`audit`](#stream
 // delta: {"stream": "m7_errors", "deltas": [M7Error…], "sent_at_ms": 1718…}
 ```
 
+### `Stream` `exchange_messages`
+
+_Authenticated_
+
+Live tail of the exchange's own message feed: cash-limit breaches, market and delivery-area halts, member suspensions, failover notices, automated order transfers. This is what the exchange *says*; [`m7_errors`](#stream-m7_errors) is what goes *wrong*. No snapshot on subscribe — seed history via [`list_exchange_messages`](#cmd-list_exchange_messages) and de-duplicate the tail on `msg_id`.
+
+**Authenticated-only, no permission**: the halts and suspensions on this feed are what every trader on the desk has to see the moment they land, and the private messages are already scoped to this member by the exchange. The *history* of the same log is gated (`read_m7_errors`) because history is a compliance read.
+
+The stream also carries the messages the exchange marks non-persistent, which are never stored: their `id` is `null` and they cannot be re-fetched afterwards, so a client that needs them must be subscribed when they arrive.
+
+#### Example
+
+```json
+{"action": "subscribe", "stream": "exchange_messages"}
+{"action": "unsubscribe", "stream": "exchange_messages"}
+
+// delta: {"stream": "exchange_messages", "deltas": [ExchangeMessage…], "sent_at_ms": 1718…}
+```
+
 ## Commands: Orders
 
 All order fields and validation match REST `POST/PUT/DELETE /order` exactly (cents / sub-MW; see the REST reference for full field semantics).
@@ -411,6 +432,8 @@ A *rejected* order is a **successful** response carrying `state: "REJECTED"` and
 _Permission: modify_order_
 
 Amend price, quantity, or validity of an existing order, or activate/deactivate it. Mirrors REST `PUT /order` and gRPC `ModifyOrder`.
+
+**A hibernated order holds no exposure, and `activate` is a full pre-trade entry.** The exchange releases a hibernated order's cash allocation and re-enters it as a new order on activation, so hibernated orders are excluded from both the cash and the position sums. `activate` therefore runs the whole gate — position limits (House and member), cash limits, and self-trade prevention — with the same rejections as [`new_order`](#cmd-new_order), and can be refused. `deactivate` only removes exposure and is never refused on a limit. A `modify` on an order that is already hibernated changes no live exposure and is likewise not measured against the limits; the size it comes back with is checked when it is activated.
 
 #### Parameters
 
@@ -508,7 +531,7 @@ List the caller-visible resting orders, optionally filtered. Mirrors REST `GET /
 
 ## Commands: Contracts
 
-Contract metadata and per-contract working sets. Authenticated-only. Shapes match REST `GET /contract/…`; see the REST reference for full field tables.
+Contract metadata and per-contract working sets. Authenticated-only. Shapes match REST `GET /contract/…`, including the exchange reference price (`ref_px_cents`, `ref_px_type`, `ref_px_date`, `ref_px_updated_ms`); see the REST reference for full field tables.
 
 ### `Command` `list_contracts`
 
@@ -762,64 +785,62 @@ Set the self-trade prevention policy. Under `reject`, an order that would cross 
 
 ### `Command` `get_cash_limit`
 
-Read both configured global cash pools (EUR + GBP, in cents). The global (overarching-member) limit; distinct from [`get_cash_limits`](#cmd-get_cash_limits) (the M7 feed). Mirrors REST `GET /cash_limit` and gRPC `GetCashLimit`. Authenticated-only.
+Read both cash pools (EUR + GBP, in cents). **The desk's cash limit is ECC's** — the maximum financial exposure it may build between two ECC Booking Cuts (ECC Risk Management Services R55 §3.11/§3.12), received from M7. An operator cap can only tighten it, and `house_cents` = `min(ecc_limit_cents, cap_cents)` is the number every check uses. That limit is then **partitioned**: `allocated_cents` is what the virtual members hold between them and `unallocated_cents` is what is left for orders placed on the House account itself. An ECC limit the exchange has not reported counts as **zero**, so no order may add exposure in that pool. Distinct from [`get_cash_limits`](#cmd-get_cash_limits) (the raw M7 feed). Mirrors REST `GET /cash_limit` and gRPC `GetCashLimit`. Authenticated-only.
 
 #### Example
 
 ```json
 {"action": "get_cash_limit", "req_id": "…"}
-// → result: {"cents": <EUR cents>, "gbp_cents": <GBP cents>}
+// → result: {
+//     "eur": {"ecc_limit_cents": 10000000, "ecc_revision": 7,
+//             "ecc_effective_from": "2026-09-03", "m7_remaining_cents": 8412300,
+//             "cap_cents": null, "house_cents": 10000000,
+//             "allocated_cents": 7500000, "unallocated_cents": 2500000,
+//             "over_allocated": false,
+//             "cap_above_ecc": false, "breached": false},
+//     "gbp": {…}
+//   }
 ```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `ecc_limit_cents` | `i64?` | The ECC limit in force for the pool. `null` when the exchange has reported none. |
+| `ecc_revision` | `i64?` | Revision of the ECC record the limit came from. |
+| `ecc_effective_from` | `string?` | The date that record takes effect, `YYYY-MM-DD` in the exposure timezone (`cash_limit.exposure_window_timezone`). The exchange sends it as an instant — a record starting at midnight CEST arrives as `22:00:00Z` the previous day — so the calendar day it names depends on that zone. `null` when not reported or unreadable; the raw exchange value is on [`get_cash_limits`](#cmd-get_cash_limits). |
+| `m7_remaining_cents` | `i64?` | What the exchange still has available before the next booking cut, already net of the desk's own open orders and trades. |
+| `cap_cents` | `i64?` | The operator cap. `null` = no cap; `0` = a deliberate cap of zero. |
+| `house_cents` | `i64` | The limit every check uses: `min(ecc_limit_cents, cap_cents)`. |
+| `allocated_cents` | `i64` | Sum of every virtual member's allocation in the pool, active and inactive alike. |
+| `unallocated_cents` | `i64` | What is left for the House (untagged) account: `house_cents − allocated_cents`. **Can be negative**; untagged orders are rejected once it reaches zero. |
+| `over_allocated` | `bool` | The allocations sum to more than `house_cents` — the exchange lowered its limit under allocations already granted. They are never shrunk on their own; the House remainder absorbs it. |
+| `cap_above_ecc` | `bool` | A standing cap now sits above the ECC limit; the cap is left untouched and the ECC limit binds. |
+| `breached` | `bool` | The exchange reports the pool's current limit below zero and has deactivated every order in that currency. |
+
+**How much an order or trade consumes.** The exchange publishes a *risk set* per product and delivery area: eight price-dependent `a` parameters and four price-independent `alpha` parameters. One leg consumes `a[case] × signed price × MWh + alpha[case] × MWh`, where `case` is chosen by side, price sign, and whether the exposure comes from a resting order or an executed trade. Voltnir reads those parameters from the exchange and prices with them, so its arithmetic is the exchange's arithmetic. A resting order never contributes a credit — its exposure is floored at zero — and every figure scales with the contract's delivery duration, so a 15-minute leg counts a quarter of the hourly amount.
+
+On the exchange's default risk set this reproduces ECC RM R55 §3.11 exactly: a buy at a positive price consumes its value, a trade moves the limit by its full signed value, and the risk-free order cases (sell at a positive price, buy at a negative price) cost nothing. A GB delivery area is assigned a risk set carrying ECC's *GB Price Independent Delivery Risk Parameter* as its `alpha` sell value, which is why §3.12 says GB sells also decrease the limit — and a GB risk set may charge the price term on a negative-price sell on top of that add-on, and decline to credit a negative-price buy trade.
+
+Until the exchange has published a risk set for a contract's product and area, Voltnir prices the leg with a stand-in rather than at zero: ECC's EUR rules for a non-GBP area, and the operator-configured GBP delivery-risk rate (`cash_limit.gbp_sell_reservation_*`) for a GBP one, logged once per delivery area.
 
 ### `Command` `set_cash_limit`
 
 _Permission: set_cash_limit_
 
-Update one global cash pool. Takes effect immediately; every per-member cash limit is capped at the global value. Mirrors REST `PUT /cash_limit` and gRPC `SetCashLimit`.
+Set or clear the **operator cap** on one cash pool. The House limit itself comes from ECC and is not settable; a cap only tightens it. A cap above the ECC limit is **rejected, not clamped**; one cannot be set before the exchange has reported a limit to tighten; and one that would leave `house_cents` below `allocated_cents` is refused as well, because Voltnir never shrinks a member's allocation on its own — all three are `BAD_REQUEST`, and nothing is written. Clearing a cap is always allowed. Takes effect immediately. Mirrors REST `PUT /cash_limit` and gRPC `SetCashLimit`.
 
 #### Parameters
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cents` | `i64` | Yes | New limit in cents of the target currency. Must be ≥ 0; `0` disables that pool's check. |
+| `cap_cents` | `i64?` | No | New cap in cents of the target currency. Must be ≥ 0 and at or below the ECC limit. `null` or omitted removes the cap; `0` is a deliberate cap of zero (no trading in that pool). |
 | `currency` | `string` | No | `"eur"` (default) or `"gbp"`. Unknown values are `BAD_REQUEST`. |
 
 #### Example
 
 ```json
-{"action": "set_cash_limit", "req_id": "…", "cents": 10000000}            // EUR pool
-{"action": "set_cash_limit", "req_id": "…", "cents": 5000000, "currency": "gbp"}  // GBP pool
-// → result: {"cents": …, "gbp_cents": …}
-```
-
-### `Command` `get_cash_fail_closed`
-
-Read the cash fail-closed flag. Mirrors REST `GET /cash_fail_closed` and gRPC `GetCashFailClosed`. Authenticated-only.
-
-#### Example
-
-```json
-{"action": "get_cash_fail_closed", "req_id": "…"}
-// → result: {"enabled": true}
-```
-
-### `Command` `set_cash_fail_closed`
-
-_Permission: set_cash_limit_
-
-Set the cash fail-closed flag, ECC parity (§3.11/§3.12), **enabled by default**: when enabled, a 0/unset cash limit means **no trading** in that pool; disable to opt into fail-open. Gated by `set_cash_limit` (part of the cash-limit control). Mirrors REST `PUT /cash_fail_closed` and gRPC `SetCashFailClosed`.
-
-#### Parameters
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `enabled` | `bool` | Yes | `true` = fail-closed (default posture), `false` = fail-open. |
-
-#### Example
-
-```json
-{"action": "set_cash_fail_closed", "req_id": "…", "enabled": false}
-// → result: {"enabled": false}
+{"action": "set_cash_limit", "req_id": "…", "cap_cents": 5000000}                    // cap the EUR pool
+{"action": "set_cash_limit", "req_id": "…", "cap_cents": null, "currency": "gbp"}    // remove the GBP cap
+// → result: both pools, in the get_cash_limit shape
 ```
 
 ### `Command` `get_holidays`
@@ -1046,7 +1067,7 @@ List all virtual members with their configured limits and live cash usage. Mirro
 //   "gbp_consumed_cents":0,"gbp_limit_cents":0,"gbp_remaining_cents":0}, …]
 ```
 
-`cash_limit` / `cash_limit_gbp` are the configured per-member **overrides** in EUR / GBP cents; `0` = no override (the global limit applies). The `*_consumed` / `*_limit` / `*_remaining` trio is live cash usage per pool: `consumed` = this member's open-order + executed-trade exposure; `*_limit_cents` = the **effective** cap (override capped at the global, or the inherited global; need not equal `cash_limit`); `remaining = limit − consumed` (negative when over; `0` limit = pool not enforced). Same shape and semantics as REST `GET /api/v1/members` and the gRPC `Member` message. [`get_my_members`](#cmd-get_my_members) returns the same per-member objects for the caller's assigned members.
+`cash_limit` / `cash_limit_gbp` are the member's **allocation** out of the desk's cash limit, in EUR / GBP cents. `*_limit_cents` is that same number as the enforced limit — no inheritance from the desk, no clamping to it — so the two always agree. `consumed` = this member's open-order + executed-trade exposure; `remaining = limit − consumed` (negative when over). A limit of `0` means **no allocation**: no order may add exposure in that pool. Per currency the allocations of all members — inactive included — sum to at most the desk's `house_cents`, which is what stops one member spending another's; untagged orders draw on the remainder (`unallocated_cents` on [`get_cash_limit`](#cmd-get_cash_limit)). Same shape and semantics as REST `GET /api/v1/members` and the gRPC `Member` message. [`get_my_members`](#cmd-get_my_members) returns the same per-member objects for the caller's assigned members.
 
 ### `Command` `create_member`
 
@@ -1060,7 +1081,7 @@ Create a virtual member (auto-generated sequential `short_id`). Mirrors REST `PO
 | --- | --- | --- | --- |
 | `name` | `string` | Yes | Display name. |
 | `max_position` | `i64` | No | Per-member position limit, sub-MW. |
-| `cash_limit` / `cash_limit_gbp` | `i64` | No | Per-member cash overrides in cents; `0`/omitted = no override. |
+| `cash_limit` / `cash_limit_gbp` | `i64` | No | The member's allocation out of the desk's cash limit for that pool, in cents. `0`/omitted = **no allocation**: the member cannot add exposure there. `BAD_REQUEST` when it would push the pool's allocations past the desk's House limit, or when the exchange has reported no limit for that pool. |
 
 #### Example
 
@@ -1068,7 +1089,7 @@ Create a virtual member (auto-generated sequential `short_id`). Mirrors REST `PO
 {"action": "create_member", "req_id": "…", "name": "Desk A", "max_position": 5000,
  "cash_limit": 10000000, "cash_limit_gbp": 0}
 // → result: the created Member object, same shape as get_members; a fresh member has
-//   *_consumed_cents 0 and *_remaining_cents == the effective *_limit_cents
+//   *_consumed_cents 0 and *_remaining_cents == its allocation
 ```
 
 ### `Command` `patch_member`
@@ -1083,13 +1104,53 @@ Update a member; all update fields optional. Mirrors REST `PATCH /members/{id}` 
 {"action": "patch_member", "req_id": "…", "member_id": "…", "name": "…",
  "max_position": 6000, "cash_limit": 10000000, "cash_limit_gbp": 0,
  "active": false}
-// cash_limit in cents; 0 clears the override
+// cash_limit in cents: the member's allocation out of the desk's limit. 0 takes it
+// away entirely and always succeeds; raising it is BAD_REQUEST when the pool's
+// allocations would then exceed the desk's House limit (the member's own current
+// allocation is not counted against the value replacing it).
 // → result: {} on success
 ```
 
 ## Queries & Reports
 
 These one-shot queries use the standard request/response [envelope](#envelope): send with a `req_id`, receive a correlated `{"type":"response", …, "ok":true, "result":{…}}`. The shapes below show the `result` body; on failure you get an error envelope instead (e.g. `read_audit`/`export_reports` missing → `PERMISSION_DENIED`, a bad date filter → `BAD_REQUEST`). The data matches the equivalent REST endpoint and gRPC RPC.
+
+### `Command` `list_exchange_messages`
+
+_Permission: read_m7_errors_
+
+Cursor-paginated history of the exchange-message log — the append-only record of what the exchange said. Mirrors REST `GET /api/v1/audit/exchange_messages` and gRPC `ListExchangeMessages` field for field, including the paging contract. Gated by **`read_m7_errors`**, the same permission as the M7-error log; **no new permission**.
+
+Messages the exchange marks non-persistent are streamed on [`exchange_messages`](#stream-exchange_messages) but never stored, so they never appear in this result.
+
+#### Parameters
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` | No | `null` on the first page; pass back the previous response's `next_cursor`. |
+| `limit` | `u32` | No | Default 50, max 200; an explicit `limit=0` is rejected (`BAD_REQUEST`), same rule as REST. |
+| `filters.date_from` / `filters.date_to` | `string` | No | RFC 3339 bounds on receive time. |
+| `filters.severity` | `string` | No | `urgent` · `error` · `high` · `medium` · `low` · `unknown`. |
+| `filters.scope` | `string` | No | `public` (market-wide) or `private` (this member). |
+| `filters.code` | `i64` | No | Vendor message code, e.g. `158`. |
+| `filters.sort_order` | `string` | No | `"ASC"` for oldest-first; anything else is newest-first (the default). |
+
+#### Example
+
+```json
+{"action": "list_exchange_messages", "req_id": "…", "cursor": null, "limit": 100,
+ "filters": {"severity": "error", "scope": "private", "code": 158}}
+
+// → result: {"items": [{"id": 4187, "received_at": "…", "exchange_ts": "…",
+//    "msg_id": 90210, "scope": "private", "code": 158,
+//    "key": "cash_limit_breached_member", "severity": "error",
+//    "text": "Cash limit in GBP breached! …", "product": null,
+//    "account_id": "10XDE-BG-------W", "buy_area": null, "sell_area": null,
+//    "market_supervision": false, "vars": [{"id": 6, "value": "GBP"}]}],
+//    "next_cursor": "…", "total_hint": 12}
+```
+
+`id` is the backend row id and is `null` on a message that was streamed but not stored; `msg_id` is the exchange's own identifier and is the stable de-duplication key. `key` is `null` for a message code the catalogue does not list — the raw `code` is always present.
 
 ### `Command` `audit_query`
 

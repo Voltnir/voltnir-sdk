@@ -268,6 +268,20 @@ message Contract {
   // field. Mirrors the REST `state` string exactly. "" == state not yet
   // received from M7.
   string state_raw = 28;
+  // M7 reference price for this contract in this delivery area (DFS180
+  // §6.4.32). The exchange publishes a closing price and, where it has one,
+  // an opening price; the contract carries the closing price when there is
+  // one and the opening price otherwise, with `ref_px_type` saying which.
+  // The four fields move together: either a reference price is known for the
+  // contract or none of them is set. Reference data for the trader — it is
+  // not what P&L marks against.
+  //
+  // Cents (CCY/MWh × 100), the same scale as an order price. Unset = M7 has
+  // reported no reference price; 0 and negative values are real prices.
+  optional sint64 ref_px_cents = 29;
+  string ref_px_type = 30;             // "C" closing, "O" opening; "" == none
+  string ref_px_date = 31;             // date the price refers to, YYYY-MM-DD; "" == none
+  int64 ref_px_updated_ms = 32;        // Unix ms when the price last arrived; 0 == none
 }
 
 // Combined view for GetContract / GetContractByDelivery: contract plus the
@@ -294,13 +308,16 @@ message Member {
   string name = 3;
   sint64 max_position = 4;             // sub-MW
   bool active = 5;
-  sint64 cash_limit = 6;              // EUR cents; 0 = no override (global applies)
-  sint64 cash_limit_gbp = 7;         // GBP cents; separate-pool mode; 0 = no override
+  // The member's ALLOCATION out of the desk's cash limit, in the pool's cents.
+  // Per currency the allocations of all members sum to at most the desk's House
+  // limit, so a member can only ever spend its own slice. 0 = no allocation:
+  // the member cannot add exposure in that pool at all.
+  sint64 cash_limit = 6;              // EUR cents; 0 = no allocation
+  sint64 cash_limit_gbp = 7;         // GBP cents; 0 = no allocation
   // Live cash usage (read-only projection; in each pool's cents). `consumed` is
-  // the member's open-order + executed-trade exposure; `limit` is the EFFECTIVE
-  // enforced cap (the override above capped at the global limit, or the
-  // inherited global when there is no override); `remaining = limit − consumed`
-  // (negative when over). A `*_limit` of 0 means that pool is not enforced.
+  // the member's open-order + executed-trade exposure; `limit` is the
+  // allocation above; `remaining = limit − consumed` (negative when over). A
+  // `*_limit` of 0 means no exposure may be added in that pool.
   sint64 eur_consumed_cents = 8;
   sint64 eur_limit_cents = 9;
   sint64 eur_remaining_cents = 10;
@@ -615,11 +632,11 @@ message SystemStatus {
   LicenseView license = 7;
 }
 
-// Voltnir cash-limit state for the status frame: the configured global
-// (overarching-member) limit, current consumption, and remaining headroom per
-// currency pool, all in cents. `*_limit_cents == 0` means that pool is not
-// enforced. `remaining = limit − consumed`. Distinct from `CashLimit` (the
-// M7-reported margin feed).
+// Voltnir cash-limit state for the status frame. The flat trio is the usage
+// projection: `*_limit_cents` is the effective House limit (`house_cents` of the
+// matching pool), `*_consumed_cents` is Voltnir's own computed exposure, and
+// `remaining = limit − consumed`. `eur_pool` / `gbp_pool` carry where that limit
+// came from. Distinct from `CashLimit` (the raw M7-reported feed).
 message CashLimitStatus {
   int64 eur_limit_cents = 1;
   int64 eur_consumed_cents = 2;
@@ -627,6 +644,8 @@ message CashLimitStatus {
   int64 gbp_limit_cents = 4;
   int64 gbp_consumed_cents = 5;
   int64 gbp_remaining_cents = 6;
+  CashPool eur_pool = 7;
+  CashPool gbp_pool = 8;
 }
 
 // The full installed license: status, entitlement summary, validity window,
@@ -753,31 +772,59 @@ message ContractLimitResponse {
 message GetCashLimitRequest {}
 
 message SetCashLimitRequest {
-  // Global (overarching-member) cash limit in cents of `currency`. Must be
-  // non-negative. 0 disables that pool's cash check. Per-member limits are
-  // always capped at this value. Distinct from the M7-reported GetCashLimits.
-  sint64 cents = 1;
+  reserved 1;                          // `cents`: the House limit is ECC's now
+  reserved "cents";
   // Pool to set: "eur" (default when empty) or "gbp". EUR and GBP are
   // independent pools (ECC settles them separately).
   string currency = 2;
+  // Operator cap on the pool, in cents of `currency`. Unset removes the cap and
+  // lets the ECC limit bind on its own; 0 is a deliberate cap of zero (no
+  // trading in that pool). Must be non-negative and at or below the ECC limit —
+  // a cap only ever lowers the ECC limit and one above it is rejected, never
+  // clamped.
+  google.protobuf.Int64Value cap_cents = 3;
 }
 
 message CashLimitResponse {
-  sint64 cents = 1;                    // EUR pool, cents; 0 = disabled
-  sint64 gbp_cents = 2;                // GBP pool, cents; 0 = disabled
+  reserved 1, 2;                       // `cents`, `gbp_cents`
+  reserved "cents", "gbp_cents";
+  CashPool eur = 3;
+  CashPool gbp = 4;
 }
 
-message GetCashFailClosedRequest {}
-
-message SetCashFailClosedRequest {
-  // true = ECC fail-closed (a 0/unset cash limit means no trading in that pool);
-  // false = disabled-on-zero (the pool is unbounded at a 0 limit). ECC parity is
-  // `true`; Voltnir's historical default is `false`.
-  bool enabled = 1;
-}
-
-message CashFailClosedResponse {
-  bool enabled = 1;
+// One currency pool's cash-limit provenance, in cents. The ECC limit is the
+// desk's House limit and comes from the exchange; a Voltnir cap can only lower
+// it, and `house_cents` — the number every check uses — is the smaller of the
+// two. An unreported ECC limit counts as zero, so no order may add exposure in
+// the pool until one arrives.
+message CashPool {
+  google.protobuf.Int64Value ecc_limit_cents = 1;     // unset = not reported
+  google.protobuf.Int64Value ecc_revision = 2;
+  // The date the ECC record takes effect, YYYY-MM-DD in the exposure timezone;
+  // "" when not reported. The exchange sends it as an instant, so the calendar
+  // day it names depends on that zone.
+  string ecc_effective_from = 3;
+  google.protobuf.Int64Value m7_remaining_cents = 4;  // unset = not reported
+  google.protobuf.Int64Value cap_cents = 5;           // unset = no cap
+  sint64 house_cents = 6;                             // min(ecc, cap)
+  // The standing cap is above the ECC limit: ECC lowered its limit under the
+  // cap. The cap is never mutated behind the operator's back; ECC binds.
+  bool cap_above_ecc = 7;
+  // M7 reports the pool's current limit below zero and has deactivated every
+  // order in the currency; no order may add exposure until it recovers.
+  bool breached = 8;
+  // Sum of every virtual member's allocation in the pool, active and inactive
+  // alike. Each member spends only its own slice.
+  sint64 allocated_cents = 9;
+  // What is left for the House (untagged) account: house_cents −
+  // allocated_cents. CAN BE NEGATIVE — see over_allocated. Untagged orders are
+  // bounced once it reaches zero.
+  sint64 unallocated_cents = 10;
+  // The allocations sum to more than the House limit — only reachable when the
+  // exchange lowered its limit under a sum already written. The allocations are
+  // never shrunk on their own; the House remainder absorbs it and the operator
+  // rebalances.
+  bool over_allocated = 11;
 }
 
 // ---- Bank-holiday calendars (cash-limit exposure window) --------------------
@@ -866,6 +913,7 @@ message CashLimit {
   optional string state = 7;
   optional string start_date = 8;
   optional int64 revision_no = 9;
+  optional string end_date = 10;          // absent = the record is open-ended
 }
 
 message GetCashLimitsResponse {
@@ -1060,8 +1108,12 @@ message CreateMemberRequest {
 
   string name = 2;
   sint64 max_position = 3;
-  sint64 cash_limit = 4;             // EUR cents; 0 = no override (global applies)
-  sint64 cash_limit_gbp = 5;         // GBP cents; separate-pool mode; 0 = no override
+  // Allocation out of the desk's cash limit, in the pool's cents. 0 = no
+  // allocation (the member cannot add exposure in that pool). INVALID_ARGUMENT
+  // when it would push the pool's allocations past the desk's House limit, or
+  // when the exchange has reported no limit for the pool to allocate out of.
+  sint64 cash_limit = 4;             // EUR cents; 0 = no allocation
+  sint64 cash_limit_gbp = 5;         // GBP cents; 0 = no allocation
 }
 
 message PatchMemberRequest {
@@ -1070,10 +1122,13 @@ message PatchMemberRequest {
   google.protobuf.StringValue name = 2;
   google.protobuf.Int64Value max_position = 3;
   google.protobuf.BoolValue active = 4;
-  // EUR cents; 0 clears the per-member override (global applies). The field the
-  // overarching member lowers when next-window collateral is insufficient.
+  // EUR cents; the member's allocation out of the desk's cash limit. 0 takes the
+  // allocation away (the member can no longer add EUR exposure) and always
+  // succeeds. Raising it is INVALID_ARGUMENT when the pool's allocations would
+  // then exceed the desk's House limit. This is the field the desk lowers when
+  // next-window collateral is insufficient.
   google.protobuf.Int64Value cash_limit = 5;
-  // GBP cents; 0 clears the per-member GBP override (separate-pool mode only).
+  // GBP cents; the member's allocation in the independent GBP pool. Same rules.
   google.protobuf.Int64Value cash_limit_gbp = 6;
 }
 
@@ -1205,6 +1260,39 @@ message M7ErrorItem {
 
 message M7ErrorsResponse {
   repeated M7ErrorItem items = 1;
+  string next_cursor = 2;
+  uint64 total_hint = 3;
+}
+
+// --- exchange messages -----------------------------------------------------
+// The exchange's own message feed: the append-only record of what M7 said —
+// cash-limit breaches, market and area halts, member suspensions, failover
+// notices, automated order transfers. Mirrors REST
+// GET /audit/exchange_messages and WS list_exchange_messages, and is gated by
+// read_m7_errors, the same permission as the M7-error log. No new permission.
+//
+// Messages M7 marks non-persistent are streamed live but never stored, so they
+// reach WatchExchangeMessages and never appear in this query.
+message ListExchangeMessagesRequest {
+  string cursor = 1;
+  uint32 limit = 2;       // 0 == default (50); capped at 200
+  string date_from = 3;
+  string date_to = 4;
+  string severity = 5;    // "urgent" | "error" | "high" | "medium" | "low" | "unknown"
+  string scope = 6;       // "public" | "private"
+  int64 code = 7;         // DFS200 §3 message code; 0 == unset (filter omitted)
+}
+
+message ExchangeMessageItem {
+  // JSON object of one exchange_messages row: id (null when the message was
+  // streamed but not stored), received_at, exchange_ts, msg_id, scope, code,
+  // key, severity, text (placeholders substituted), product, account_id,
+  // buy_area, sell_area, market_supervision, vars.
+  string json = 1;
+}
+
+message ListExchangeMessagesResponse {
+  repeated ExchangeMessageItem items = 1;
   string next_cursor = 2;
   uint64 total_hint = 3;
 }
@@ -1388,6 +1476,13 @@ message WatchAuditEventsRequest {}
 // read_m7_errors. Same tail semantics as WatchAuditEvents.
 message WatchM7ErrorsRequest {}
 
+// Subscribe to the live exchange-message feed (mirrors ListExchangeMessages).
+// Authenticated-only, like WatchStatus. Same tail semantics as
+// WatchAuditEvents, with one difference: the stream also carries the messages
+// M7 marks non-persistent, which are never stored and so cannot be re-fetched
+// by the unary query.
+message WatchExchangeMessagesRequest {}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -1430,15 +1525,13 @@ service VoltAPI {
   rpc GetContractLimit (GetContractLimitRequest) returns (ContractLimitResponse);
   // Requires set_position_limit.
   rpc SetContractLimit (SetContractLimitRequest) returns (ContractLimitResponse);
-  // Global (overarching-member) cash limit. GET is authenticated only;
-  // SET requires set_cash_limit. Distinct from GetCashLimits
-  // (the M7-reported per-currency feed).
+  // The desk's cash limit: what the exchange grants, the Voltnir cap that can
+  // only tighten it, and how much of it is allocated to virtual members. GET is
+  // authenticated only; SET requires set_cash_limit and is INVALID_ARGUMENT
+  // when the cap would leave the House limit below the member allocations.
+  // Distinct from GetCashLimits (the M7-reported per-currency feed).
   rpc GetCashLimit (GetCashLimitRequest) returns (CashLimitResponse);
   rpc SetCashLimit (SetCashLimitRequest) returns (CashLimitResponse);
-  // Cash-limit fail-closed switch (ECC parity). GET is authenticated only;
-  // SET requires set_cash_limit (it is part of the cash-limit control).
-  rpc GetCashFailClosed (GetCashFailClosedRequest) returns (CashFailClosedResponse);
-  rpc SetCashFailClosed (SetCashFailClosedRequest) returns (CashFailClosedResponse);
   // Bank-holiday calendars for the cash-limit exposure window. GET is
   // authenticated only; SET/ADD/REMOVE require set_cash_limit
   // (holidays are part of the cash-limit methodology). EUR and GBP are
@@ -1502,6 +1595,10 @@ service VoltAPI {
   // Requires read_m7_errors (dedicated, not ReadAudit).
   rpc QueryM7Errors (M7ErrorsRequest) returns (M7ErrorsResponse);
 
+  // ── Exchange messages ─────────────────────────────────────────────────
+  // Requires read_m7_errors — the same permission as the M7-error log.
+  rpc ListExchangeMessages (ListExchangeMessagesRequest) returns (ListExchangeMessagesResponse);
+
   // ── Streaming export (replaces REST poll-loop) ────────────────────────
   // Requires export_reports. Client cancellation is honored immediately.
   rpc ExportOrders (ExportRequest) returns (stream ExportChunk);
@@ -1544,4 +1641,7 @@ service VoltAPI {
   rpc WatchMessages (WatchMessagesRequest) returns (stream MessageItem);
   rpc WatchAuditEvents (WatchAuditEventsRequest) returns (stream AuditEventItem);
   rpc WatchM7Errors (WatchM7ErrorsRequest) returns (stream M7ErrorItem);
+  // Exchange messages tail the same way, authenticated-only, and also carry the
+  // non-persistent messages the unary query cannot return.
+  rpc WatchExchangeMessages (WatchExchangeMessagesRequest) returns (stream ExchangeMessageItem);
 }

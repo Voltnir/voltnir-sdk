@@ -15,6 +15,7 @@ from ._generated import voltnir_api_v1_pb2_grpc as pb2_grpc
 from ._orders import (
     build_modify_order_request,
     build_patch_member_request,
+    build_set_cash_limit_request,
     build_submit_order_request,
 )
 from .errors import (
@@ -355,6 +356,14 @@ class AsyncVoltnirClient:
         - `predefined=False` marks a user-defined block contract, which accepts
           only block orders; a regular order there is rejected by the exchange.
 
+        Each contract carries the exchange's reference price for its delivery
+        area: `ref_px_cents`, `ref_px_type` ("C" closing -- the exchange's
+        default -- or "O" opening), `ref_px_date` (YYYY-MM-DD) and
+        `ref_px_updated_ms`. Read `ref_px_cents` with `HasField`: it uses proto3
+        field presence because 0 and negative are real prices on a power market,
+        so 0 cannot double as "not reported". It is reference data, not the mark
+        `get_pnl` values open positions at.
+
         Units on the returned contracts are wire units: prices in cents,
         quantities in sub-MW."""
         return await self._unary(
@@ -457,8 +466,8 @@ class AsyncVoltnirClient:
 
         **0 does NOT disable the limit. 0 BLOCKS all new position-taking.**
         The check stays active at zero, so setting this to 0 to "turn the limit
-        off" halts the desk. That is the opposite polarity to
-        `set_cash_limit(cents=0)`, which does disable its pool.
+        off" halts the desk. `set_cash_limit(cap_cents=0)` reads the same way:
+        zero is a real ceiling, not an off switch.
 
         Requires the set_contract_limit permission.
         """
@@ -467,52 +476,47 @@ class AsyncVoltnirClient:
         )
 
     async def get_cash_limit(self) -> pb2.CashLimitResponse:
-        """Global (overarching-member) cash limit in EUR cents. Distinct from
-        get_cash_limits(), which reports the M7-supplied per-currency feed."""
+        """Both cash pools: the exchange's cash limit for the desk, what the
+        exchange still has available, the Voltnir cap, and the effective House
+        limit every check uses.
+
+        Each pool carries `ecc_limit_cents` (the exchange's limit, with its
+        revision, and the date it takes effect as YYYY-MM-DD in the gateway's
+        exposure timezone), `m7_remaining_cents` (what is left before
+        the next booking cut), `cap_cents` (the Voltnir cap, unset when there is
+        none), and `house_cents` = min(ecc_limit_cents, cap_cents). A limit the
+        exchange has not reported counts as zero, so no order may add exposure
+        in that pool. `cap_above_ecc` marks a cap the exchange has since dropped
+        below; `breached` marks a pool the exchange has suspended.
+
+        Distinct from get_cash_limits(), which reports the raw per-currency
+        feed."""
         return await self._unary("GetCashLimit", pb2.GetCashLimitRequest())
 
-    async def set_cash_limit(self, *, cents: int, currency: str = "eur") -> pb2.CashLimitResponse:
-        """Set the global cash limit for one currency pool, in CENTS.
+    async def set_cash_limit(
+        self, *, cap_cents: int | None = None, currency: str = "eur"
+    ) -> pb2.CashLimitResponse:
+        """Set or clear the Voltnir cap on one cash pool, in CENTS.
 
-        `currency` is "eur" (default) or "gbp"; the GBP pool is only enforced
-        with `separate_gbp_pool`. Passing the wrong currency writes the limit
-        into the wrong pool and silently leaves the other uncapped.
+        The desk's cash limit comes from the exchange. A cap only ever tightens
+        it: the limit in force is min(exchange limit, cap). `cap_cents=None`
+        removes the cap and lets the exchange's limit bind on its own;
+        `cap_cents=0` is a deliberate cap of zero, meaning no trading in that
+        pool.
 
-        **`cents=0` DISABLES the pool** (unbounded) -- unless
-        `set_cash_fail_closed(True)` is set, in which case 0 means the opposite:
-        no trading in that pool at all. Note also that
-        `set_contract_limit(quantity=0)` means BLOCK, not disable. Three
-        adjacent settings, three meanings of zero.
+        `currency` is "eur" (default) or "gbp"; the two pools are settled
+        separately and never net against each other.
+
+        A cap above the exchange's limit is REJECTED, not clamped, and so is a
+        cap set before the exchange has published a limit to tighten — the error
+        names the pool and both amounts.
 
         Use `eur_to_cents()` if you are holding a decimal amount.
         Requires the set_cash_limit permission.
         """
-        # cents in the pool's currency; 0 disables that pool. currency is
-        # "eur" (default) or "gbp" (only enforced with separate_gbp_pool).
-        # Requires set_cash_limit.
         return await self._unary(
-            "SetCashLimit", pb2.SetCashLimitRequest(cents=cents, currency=currency)
-        )
-
-    async def get_cash_fail_closed(self) -> pb2.CashFailClosedResponse:
-        """ECC fail-closed switch. When enabled, a 0/unset cash limit means no
-        trading in that pool (ECC parity) rather than 'disabled'."""
-        return await self._unary(
-            "GetCashFailClosed", pb2.GetCashFailClosedRequest()
-        )
-
-    async def set_cash_fail_closed(self, *, enabled: bool) -> pb2.CashFailClosedResponse:
-        """ECC fail-closed switch. This FLIPS the meaning of a zero cash limit.
-
-        `True`  -> a 0/unset cash limit means NO TRADING in that pool (ECC parity).
-        `False` -> a 0/unset cash limit means the pool is unbounded.
-
-        So enabling this on a desk that left a pool at 0 halts that pool
-        immediately. Requires the set_cash_limit permission.
-        """
-        # Requires set_cash_limit (part of the cash-limit control).
-        return await self._unary(
-            "SetCashFailClosed", pb2.SetCashFailClosedRequest(enabled=enabled)
+            "SetCashLimit",
+            build_set_cash_limit_request(cap_cents=cap_cents, currency=currency),
         )
 
     async def get_holidays(self) -> pb2.HolidaysResponse:
@@ -758,15 +762,19 @@ class AsyncVoltnirClient:
         """All virtual members, with their limits and live cash usage.
 
         Requires the `manage_members` permission. Units: `max_position` is
-        sub-MW; every `*_cents` field is cents. `cash_limit` 0 means no
-        per-member override, so the global limit applies."""
+        sub-MW; every `*_cents` field is cents. `cash_limit` is the member's
+        allocation out of the desk's cash limit, and `eur_limit_cents` is that
+        same number as the enforced limit; 0 means no allocation, so the member
+        cannot add exposure in that pool."""
         return await self._unary("ListMembers", pb2.ListMembersRequest())
 
     async def create_member(self, *, name: str, max_position: int, cash_limit: int = 0, cash_limit_gbp: int = 0) -> pb2.Member:
-        """Create a virtual member. The VM-style `short_id` is generated
-        server-side and returned in the `Member` response. `cash_limit` is in
-        EUR cents and `cash_limit_gbp` in GBP cents (separate-pool mode); 0 = no
-        per-member override → the global limit applies."""
+        """Create a virtual member; see `VoltnirClient.create_member`.
+
+        `cash_limit` (EUR cents) and `cash_limit_gbp` (GBP cents) are the
+        member's allocations out of the desk's cash limit; 0 means no
+        allocation. INVALID_ARGUMENT when the pool's allocations would exceed
+        the desk's limit."""
         return await self._unary(
             "CreateMember",
             pb2.CreateMemberRequest(
@@ -852,6 +860,31 @@ class AsyncVoltnirClient:
         `err_code` (0 → unset)."""
         return await self._unary(
             "QueryM7Errors", _build(pb2.M7ErrorsRequest, kwargs)
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Exchange messages
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def list_exchange_messages(self, **kwargs) -> pb2.ListExchangeMessagesResponse:
+        """Query the exchange-message log: the append-only record of what the
+        exchange said — cash-limit breaches, market and delivery-area halts,
+        member suspensions, failover notices, automated order transfers. The
+        companion to `query_m7_errors`, which records what went wrong instead,
+        and gated by the same `read_m7_errors` permission.
+
+        Filter fields: `cursor`, `limit` (0 → 50, capped 200), `date_from`,
+        `date_to`, `severity` (`urgent` / `error` / `high` / `medium` / `low` /
+        `unknown`), `scope` (`public` / `private`), `code` (0 → unset).
+
+        Each `item.json` carries the row as JSON: `msg_id` (the exchange's own
+        identifier and the de-duplication key), `code`, `key` (the catalogue
+        name for that code, or null), `severity`, `text` with its placeholders
+        already substituted, and the raw `vars`. Messages the exchange marks
+        non-persistent are streamed by `watch_exchange_messages()` and never
+        stored, so they never appear here."""
+        return await self._unary(
+            "ListExchangeMessages", _build(pb2.ListExchangeMessagesRequest, kwargs)
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -999,4 +1032,22 @@ class AsyncVoltnirClient:
         are pushed. Clients filter inline."""
         return self._stream(
             "WatchM7Errors", pb2.WatchM7ErrorsRequest(), timeout=timeout
+        )
+
+    def watch_exchange_messages(
+        self, *, timeout: float | None = None
+    ) -> AsyncIterator[pb2.ExchangeMessageItem]:
+        """Tail the exchange's own message feed. Authenticated; no permission —
+        the halts and suspensions on this feed are what every trader has to see
+        the moment they land, while the *history* of the same log is gated by
+        `read_m7_errors`. No snapshot (seed via `list_exchange_messages()`);
+        messages received after subscribe are pushed, and clients de-duplicate
+        on `msg_id`.
+
+        The stream also carries the messages the exchange marks non-persistent,
+        which are never stored: their `id` is null and they cannot be
+        re-fetched, so a client that needs them must be subscribed when they
+        arrive."""
+        return self._stream(
+            "WatchExchangeMessages", pb2.WatchExchangeMessagesRequest(), timeout=timeout
         )

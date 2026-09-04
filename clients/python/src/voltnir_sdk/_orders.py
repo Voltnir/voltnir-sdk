@@ -44,6 +44,7 @@ __all__ = [
     "build_submit_order_request",
     "build_modify_order_request",
     "build_patch_member_request",
+    "build_set_cash_limit_request",
 ]
 
 
@@ -361,7 +362,7 @@ def build_patch_member_request(
 
     Unlike `modify_order`, this genuinely is a patch: the wrapper types mean an
     omitted field is left untouched server-side, and passing 0 for a cash limit
-    explicitly clears the per-member override.
+    takes the member's allocation out of the desk's limit away entirely.
     """
     if not id:
         raise OrderValidationError(
@@ -381,4 +382,23 @@ def build_patch_member_request(
         req.cash_limit_gbp.CopyFrom(
             wrappers_pb2.Int64Value(value=cash_limit_gbp_cents)
         )
+    return req
+
+
+def build_set_cash_limit_request(
+    *,
+    cap_cents: int | None = None,
+    currency: str = "eur",
+) -> pb2.SetCashLimitRequest:
+    """Build a `SetCashLimitRequest` for the Voltnir cap on one cash pool.
+
+    `cap_cents=None` leaves the wrapper unset, which the gateway reads as
+    "remove the cap" — the exchange's own limit then binds alone. That is a
+    different instruction from `cap_cents=0`, a deliberate cap of zero, which
+    stops all trading in the pool. The wrapper type is what keeps the two
+    distinguishable on the wire.
+    """
+    req = pb2.SetCashLimitRequest(currency=currency)
+    if cap_cents is not None:
+        req.cap_cents.CopyFrom(wrappers_pb2.Int64Value(value=cap_cents))
     return req

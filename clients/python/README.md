@@ -131,7 +131,7 @@ scale produced it.
 | `OwnOrder.quantity` / `initial_quantity` / `hidden_quantity` / `displayed_quantity` | x 1 000 | `sub_mw_to_quantity` |
 | `OwnTrade.qty`, `PublicTrade.qty`, `ObEntry.quantity`, `Contract.best_bid_qty` / `best_ask_qty` | x 1 000 | `sub_mw_to_quantity` |
 | `ContractDetail.net_pos`, `ContractPnl.signed_position`, `Member.max_position`, `SystemStatus.order_pos_limit` | x 1 000 | `sub_mw_to_quantity` |
-| `Member.cash_limit` / `eur_*_cents` / `gbp_*_cents`, `CashLimitStatus.*_cents`, `CashLimitResponse.cents` | x 100 | `cents_to_eur` |
+| `Member.cash_limit` / `eur_*_cents` / `gbp_*_cents`, `CashLimitStatus.*_cents`, `CashPool.*_cents` | x 100 | `cents_to_eur` |
 | `Contract.best_bid` / `best_ask` | x 100 | `cents_to_price` |
 | `PnlSnapshot` `avg_open_px` / `mark_px` | x 100 | `cents_to_price` |
 | `GetHub2HubResponse` `atc_out` / `atc_in` | x 1 000 | `sub_mw_to_quantity` |
@@ -526,6 +526,9 @@ for item in client.watch_messages(timeout=30.0):
 # Compliance audit + M7 exchange errors (gated by read_audit / read_m7_errors).
 events = client.query_audit_events(limit=50, action="permissions_set")
 errors = client.query_m7_errors(limit=50, kind="err_resp")
+
+# What the exchange said: breaches, halts, suspensions, failover notices.
+notices = client.list_exchange_messages(limit=50, severity="error")
 ```
 
 | RPC family       | Methods                                                                 |
@@ -533,11 +536,15 @@ errors = client.query_m7_errors(limit=50, kind="err_resp")
 | Order/contract   | `watch_contract`, `watch_order`, `watch_orders`                         |
 | Trades / tape    | `watch_trades`, `watch_public_trades`                                   |
 | Polled snapshots | `watch_pnl`, `watch_state`, `watch_status` (unary mirror: `get_status`) |
-| Log tails        | `watch_messages`, `watch_audit_events`, `watch_m7_errors`               |
+| Log tails        | `watch_messages`, `watch_audit_events`, `watch_m7_errors`, `watch_exchange_messages` |
 | Audit / M7 query | `query_audit_orders/trades/public_trades/events`, `query_m7_errors`     |
+| Exchange messages| `list_exchange_messages`, `watch_exchange_messages`                     |
 
 `watch_audit_events` / `watch_m7_errors` are permission-gated server-side
 (`read_audit` / `read_m7_errors`), identical to their unary query RPCs.
+`watch_exchange_messages` is authenticated-only — the halts and suspensions on
+that feed are what every trader has to see the moment they land — while its
+history (`list_exchange_messages`) shares the `read_m7_errors` gate.
 
 ## Verify against a live server
 
@@ -682,6 +689,9 @@ call site; none of them keep working with a changed meaning.
 | `modify_order(price=Int64Value(value=5100))` | `modify_order(price_cents=5100, quantity_sub_mw=...)` |
 | `patch_member(active=BoolValue(value=False))` | `patch_member(active=False)` |
 | `except DeadlineExceeded` around a submit | `except OrderOutcomeUnknown` (see Errors) |
+| `set_cash_limit(cents=...)` | `set_cash_limit(cap_cents=...)` — a cap on the exchange's limit, not a limit of its own |
+| `get_cash_limit().cents` | `get_cash_limit().eur.house_cents` (and `.gbp`) |
+| `set_cash_fail_closed(enabled=...)` | removed — a cash limit is always enforced |
 
 Why each one changed:
 
@@ -697,6 +707,10 @@ Why each one changed:
   `TypeError` unless you imported `google.protobuf.wrappers_pb2` yourself.
 - **Ambiguous failures have their own type.** `DeadlineExceeded` on a submit
   used to look like "it failed"; it never meant that.
+- **The desk's cash limit comes from the exchange.** Voltnir no longer holds a
+  House limit of its own; `set_cash_limit` sets a cap that can only tighten the
+  exchange's, and one above it is rejected rather than clamped. With the limit
+  always enforced, the fail-closed switch had nothing left to select between.
 
 Also new, non-breaking: generated type stubs, `__version__`, keepalive and a
 64 MB message ceiling by default, and an `options=` passthrough for channel

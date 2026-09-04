@@ -222,7 +222,7 @@ def eur_to_cents(value: Number, *, field: str = "amount_eur") -> int:
     """EUR (or GBP) -> wire cents, for CASH limits, not prices.
 
     Separate from `price_to_cents` on purpose. Same multiplier today, different
-    field and different meaning: this one feeds `set_cash_limit(cents=...)`,
+    field and different meaning: this one feeds `set_cash_limit(cap_cents=...)`,
     `create_member(cash_limit=...)` and `patch_member(cash_limit_cents=...)`,
     where the value is an absolute money amount rather than a rate per MWh.
 
@@ -236,7 +236,7 @@ def cents_to_eur(cents: int) -> Decimal:
     """Wire cents -> EUR, exactly. For cash limits and member cash fields.
 
     Applies to `Member.cash_limit`, `Member.eur_*_cents`,
-    `CashLimitStatus.*_cents`, and `CashLimitResponse.cents`.
+    `CashLimitStatus.*_cents`, and every `*_cents` field on `CashPool`.
 
     >>> cents_to_eur(5000000)
     Decimal('50000')

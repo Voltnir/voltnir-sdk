@@ -139,16 +139,6 @@ class VoltAPIStub(object):
                 request_serializer=voltnir__api__v1__pb2.SetCashLimitRequest.SerializeToString,
                 response_deserializer=voltnir__api__v1__pb2.CashLimitResponse.FromString,
                 _registered_method=True)
-        self.GetCashFailClosed = channel.unary_unary(
-                '/voltnir.api.v1.VoltAPI/GetCashFailClosed',
-                request_serializer=voltnir__api__v1__pb2.GetCashFailClosedRequest.SerializeToString,
-                response_deserializer=voltnir__api__v1__pb2.CashFailClosedResponse.FromString,
-                _registered_method=True)
-        self.SetCashFailClosed = channel.unary_unary(
-                '/voltnir.api.v1.VoltAPI/SetCashFailClosed',
-                request_serializer=voltnir__api__v1__pb2.SetCashFailClosedRequest.SerializeToString,
-                response_deserializer=voltnir__api__v1__pb2.CashFailClosedResponse.FromString,
-                _registered_method=True)
         self.GetHolidays = channel.unary_unary(
                 '/voltnir.api.v1.VoltAPI/GetHolidays',
                 request_serializer=voltnir__api__v1__pb2.GetHolidaysRequest.SerializeToString,
@@ -299,6 +289,11 @@ class VoltAPIStub(object):
                 request_serializer=voltnir__api__v1__pb2.M7ErrorsRequest.SerializeToString,
                 response_deserializer=voltnir__api__v1__pb2.M7ErrorsResponse.FromString,
                 _registered_method=True)
+        self.ListExchangeMessages = channel.unary_unary(
+                '/voltnir.api.v1.VoltAPI/ListExchangeMessages',
+                request_serializer=voltnir__api__v1__pb2.ListExchangeMessagesRequest.SerializeToString,
+                response_deserializer=voltnir__api__v1__pb2.ListExchangeMessagesResponse.FromString,
+                _registered_method=True)
         self.ExportOrders = channel.unary_stream(
                 '/voltnir.api.v1.VoltAPI/ExportOrders',
                 request_serializer=voltnir__api__v1__pb2.ExportRequest.SerializeToString,
@@ -363,6 +358,11 @@ class VoltAPIStub(object):
                 '/voltnir.api.v1.VoltAPI/WatchM7Errors',
                 request_serializer=voltnir__api__v1__pb2.WatchM7ErrorsRequest.SerializeToString,
                 response_deserializer=voltnir__api__v1__pb2.M7ErrorItem.FromString,
+                _registered_method=True)
+        self.WatchExchangeMessages = channel.unary_stream(
+                '/voltnir.api.v1.VoltAPI/WatchExchangeMessages',
+                request_serializer=voltnir__api__v1__pb2.WatchExchangeMessagesRequest.SerializeToString,
+                response_deserializer=voltnir__api__v1__pb2.ExchangeMessageItem.FromString,
                 _registered_method=True)
 
 
@@ -489,29 +489,17 @@ class VoltAPIServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def GetCashLimit(self, request, context):
-        """Global (overarching-member) cash limit. GET is authenticated only;
-        SET requires set_cash_limit. Distinct from GetCashLimits
-        (the M7-reported per-currency feed).
+        """The desk's cash limit: what the exchange grants, the Voltnir cap that can
+        only tighten it, and how much of it is allocated to virtual members. GET is
+        authenticated only; SET requires set_cash_limit and is INVALID_ARGUMENT
+        when the cap would leave the House limit below the member allocations.
+        Distinct from GetCashLimits (the M7-reported per-currency feed).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def SetCashLimit(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GetCashFailClosed(self, request, context):
-        """Cash-limit fail-closed switch (ECC parity). GET is authenticated only;
-        SET requires set_cash_limit (it is part of the cash-limit control).
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def SetCashFailClosed(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -722,6 +710,14 @@ class VoltAPIServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListExchangeMessages(self, request, context):
+        """── Exchange messages ─────────────────────────────────────────────────
+        Requires read_m7_errors — the same permission as the M7-error log.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ExportOrders(self, request, context):
         """── Streaming export (replaces REST poll-loop) ────────────────────────
         Requires export_reports. Client cancellation is honored immediately.
@@ -827,6 +823,14 @@ class VoltAPIServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def WatchExchangeMessages(self, request, context):
+        """Exchange messages tail the same way, authenticated-only, and also carry the
+        non-persistent messages the unary query cannot return.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_VoltAPIServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -919,16 +923,6 @@ def add_VoltAPIServicer_to_server(servicer, server):
                     servicer.SetCashLimit,
                     request_deserializer=voltnir__api__v1__pb2.SetCashLimitRequest.FromString,
                     response_serializer=voltnir__api__v1__pb2.CashLimitResponse.SerializeToString,
-            ),
-            'GetCashFailClosed': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetCashFailClosed,
-                    request_deserializer=voltnir__api__v1__pb2.GetCashFailClosedRequest.FromString,
-                    response_serializer=voltnir__api__v1__pb2.CashFailClosedResponse.SerializeToString,
-            ),
-            'SetCashFailClosed': grpc.unary_unary_rpc_method_handler(
-                    servicer.SetCashFailClosed,
-                    request_deserializer=voltnir__api__v1__pb2.SetCashFailClosedRequest.FromString,
-                    response_serializer=voltnir__api__v1__pb2.CashFailClosedResponse.SerializeToString,
             ),
             'GetHolidays': grpc.unary_unary_rpc_method_handler(
                     servicer.GetHolidays,
@@ -1080,6 +1074,11 @@ def add_VoltAPIServicer_to_server(servicer, server):
                     request_deserializer=voltnir__api__v1__pb2.M7ErrorsRequest.FromString,
                     response_serializer=voltnir__api__v1__pb2.M7ErrorsResponse.SerializeToString,
             ),
+            'ListExchangeMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListExchangeMessages,
+                    request_deserializer=voltnir__api__v1__pb2.ListExchangeMessagesRequest.FromString,
+                    response_serializer=voltnir__api__v1__pb2.ListExchangeMessagesResponse.SerializeToString,
+            ),
             'ExportOrders': grpc.unary_stream_rpc_method_handler(
                     servicer.ExportOrders,
                     request_deserializer=voltnir__api__v1__pb2.ExportRequest.FromString,
@@ -1144,6 +1143,11 @@ def add_VoltAPIServicer_to_server(servicer, server):
                     servicer.WatchM7Errors,
                     request_deserializer=voltnir__api__v1__pb2.WatchM7ErrorsRequest.FromString,
                     response_serializer=voltnir__api__v1__pb2.M7ErrorItem.SerializeToString,
+            ),
+            'WatchExchangeMessages': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchExchangeMessages,
+                    request_deserializer=voltnir__api__v1__pb2.WatchExchangeMessagesRequest.FromString,
+                    response_serializer=voltnir__api__v1__pb2.ExchangeMessageItem.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1646,60 +1650,6 @@ class VoltAPI(object):
             '/voltnir.api.v1.VoltAPI/SetCashLimit',
             voltnir__api__v1__pb2.SetCashLimitRequest.SerializeToString,
             voltnir__api__v1__pb2.CashLimitResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetCashFailClosed(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/voltnir.api.v1.VoltAPI/GetCashFailClosed',
-            voltnir__api__v1__pb2.GetCashFailClosedRequest.SerializeToString,
-            voltnir__api__v1__pb2.CashFailClosedResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def SetCashFailClosed(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/voltnir.api.v1.VoltAPI/SetCashFailClosed',
-            voltnir__api__v1__pb2.SetCashFailClosedRequest.SerializeToString,
-            voltnir__api__v1__pb2.CashFailClosedResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -2521,6 +2471,33 @@ class VoltAPI(object):
             _registered_method=True)
 
     @staticmethod
+    def ListExchangeMessages(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/voltnir.api.v1.VoltAPI/ListExchangeMessages',
+            voltnir__api__v1__pb2.ListExchangeMessagesRequest.SerializeToString,
+            voltnir__api__v1__pb2.ListExchangeMessagesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def ExportOrders(request,
             target,
             options=(),
@@ -2861,6 +2838,33 @@ class VoltAPI(object):
             '/voltnir.api.v1.VoltAPI/WatchM7Errors',
             voltnir__api__v1__pb2.WatchM7ErrorsRequest.SerializeToString,
             voltnir__api__v1__pb2.M7ErrorItem.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchExchangeMessages(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/voltnir.api.v1.VoltAPI/WatchExchangeMessages',
+            voltnir__api__v1__pb2.WatchExchangeMessagesRequest.SerializeToString,
+            voltnir__api__v1__pb2.ExchangeMessageItem.FromString,
             options,
             channel_credentials,
             insecure,

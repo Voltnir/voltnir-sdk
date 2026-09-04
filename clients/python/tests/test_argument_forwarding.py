@@ -7,7 +7,7 @@ is not the order you asked for. The consequences are specific and expensive:
     submit_order    losing display_qty          an iceberg becomes fully lit
     submit_order    losing v_member_short_id    order tagged to the wrong member
     create_member   losing cash_limit           a member with no cash ceiling
-    set_cash_limit  ignoring currency           a GBP limit in the EUR pool
+    set_cash_limit  ignoring currency           a GBP cap on the EUR pool
     set_permissions losing permissions          a user stripped of access
 
 Each is a plausible one-line slip, so the money-touching wrappers are called
@@ -185,14 +185,15 @@ def test_happy_patch_member_forwards_every_field(client, fake):
 
 @pytest.mark.parametrize("currency", ["eur", "gbp"])
 def test_happy_set_cash_limit_forwards_the_currency(client, fake, currency):
-    """Ignoring `currency` writes a GBP limit into the EUR pool, or vice versa.
+    """Ignoring `currency` caps the EUR pool instead of the GBP one, or vice
+    versa.
 
-    The pools are enforced separately, so a misdirected limit silently removes
-    the ceiling on one of them.
+    The pools are enforced separately, so a misdirected cap leaves the pool the
+    operator meant to tighten running at the exchange's full limit.
     """
-    client.set_cash_limit(cents=750_000, currency=currency)
+    client.set_cash_limit(cap_cents=750_000, currency=currency)
     req = fake.requests["SetCashLimit"]
-    assert req.cents == 750_000
+    assert req.cap_cents.value == 750_000
     assert req.currency == currency
 
 
@@ -255,12 +256,26 @@ def test_happy_set_trading_allowed_forwards_both_states(client, fake):
     assert fake.requests["SetTradingAllowed"].allowed is False
 
 
-def test_happy_set_cash_fail_closed_forwards_both_states(client, fake):
-    client.set_cash_fail_closed(enabled=True)
-    assert fake.requests["SetCashFailClosed"].enabled is True
+def test_happy_set_cash_limit_forwards_the_cap(client, fake):
+    client.set_cash_limit(cap_cents=250_000, currency="gbp")
+    req = fake.requests["SetCashLimit"]
+    assert req.currency == "gbp"
+    assert req.HasField("cap_cents")
+    assert req.cap_cents.value == 250_000
 
-    client.set_cash_fail_closed(enabled=False)
-    assert fake.requests["SetCashFailClosed"].enabled is False
+
+def test_edge_set_cash_limit_distinguishes_no_cap_from_a_zero_cap(client, fake):
+    # An omitted cap means "remove the cap"; a cap of 0 means "no trading in
+    # this pool". Collapsing the two would silently halt or unleash a desk, so
+    # the wrapper field must stay unset in the first case and set in the second.
+    client.set_cash_limit()
+    assert not fake.requests["SetCashLimit"].HasField("cap_cents")
+
+    client.set_cash_limit(cap_cents=0)
+    req = fake.requests["SetCashLimit"]
+    assert req.HasField("cap_cents")
+    assert req.cap_cents.value == 0
+    assert req.currency == "eur", "eur is the default pool"
 
 
 # ── read paths whose filters silently narrow results ────────────────────────

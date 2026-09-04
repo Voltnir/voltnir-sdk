@@ -89,11 +89,15 @@ _OVERRIDES = {
     "watch_orders": {"delivery_area": "10YBE----------2"},
     "watch_public_trades": {"contract_ids": [42]},
     "watch_pnl": {"v_member_short_id": "VM001"},
+    # Every parameter has a default (an omitted cap means "remove the cap"), so
+    # the harness would otherwise call it with nothing and assert nothing.
+    "set_cash_limit": {"cap_cents": 7, "currency": "gbp"},
     "query_audit_orders": {"limit": 5},
     "query_audit_trades": {"limit": 5},
     "query_audit_public_trades": {"limit": 5},
     "query_audit_events": {"limit": 5, "action": "permissions_set"},
     "query_m7_errors": {"limit": 5, "kind": "err_resp"},
+    "list_exchange_messages": {"limit": 5, "severity": "error"},
     "export_orders": {"from_": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z"},
     "export_trades": {"from_": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z"},
 }
@@ -490,6 +494,7 @@ WATCH_METHODS = [
     "watch_messages",
     "watch_audit_events",
     "watch_m7_errors",
+    "watch_exchange_messages",
 ]
 
 
@@ -520,6 +525,37 @@ def test_query_audit_events_permission_denied(client, fake):
     fake.abort_code = grpc.StatusCode.PERMISSION_DENIED
     with pytest.raises(PermissionDenied):
         client.query_audit_events()
+
+
+def test_list_exchange_messages_happy(client, fake):
+    # Happy: every filter reaches the request, including the numeric code.
+    resp = client.list_exchange_messages(
+        limit=10, severity="error", scope="private", code=158
+    )
+    assert len(resp.items) == 1
+    req = fake.requests["ListExchangeMessages"]
+    assert req.limit == 10
+    assert req.severity == "error"
+    assert req.scope == "private"
+    assert req.code == 158
+
+
+def test_list_exchange_messages_no_filters_sends_defaults(client, fake):
+    # Edge: zero kwargs → an all-default request. `code=0` and the empty
+    # strings are proto3 defaults and mean "no filter", not "code 0".
+    client.list_exchange_messages()
+    req = fake.requests["ListExchangeMessages"]
+    assert req.limit == 0
+    assert req.severity == ""
+    assert req.scope == ""
+    assert req.code == 0
+
+
+def test_list_exchange_messages_permission_denied(client, fake):
+    # Fail: the log shares the read_m7_errors gate, rejected server-side.
+    fake.abort_code = grpc.StatusCode.PERMISSION_DENIED
+    with pytest.raises(PermissionDenied):
+        client.list_exchange_messages()
 
 
 def test_query_m7_errors_invalid_argument(client, fake):

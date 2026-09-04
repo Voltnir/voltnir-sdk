@@ -68,7 +68,7 @@ Permission gates are enforced per-RPC. The variants are identical to REST:
 | `delete_order` | Cancel one or all orders |
 | `toggle_trading` | Set the *trading allowed* kill-switch |
 | `set_position_limit` | Update the per-contract net-position cap |
-| `set_cash_limit` | Update the global (overarching-member) cash limit |
+| `set_cash_limit` | Set the Voltnir cap on the desk cash limit |
 | `set_self_trade_policy` | Set the self-trade (cross-trade) prevention policy |
 | `manage_users` | List / create / delete users, set permissions, rotate keys, set member assignments |
 | `manage_members` | List / create / patch virtual members |
@@ -94,7 +94,7 @@ gRPC uses a status enum instead of HTTP codes. Voltnir's mapping is exhaustive a
 | 403 | `PERMISSION_DENIED` | Caller lacks the required permission |
 | 404 | `NOT_FOUND` | Unknown contract / order / user / member |
 | 409 | `ABORTED` | State conflict, e.g. modify already in progress |
-| 422 | `FAILED_PRECONDITION` | Position limit / cash limit / self-cross exceeded, or trading disabled (operator kill-switch) |
+| 422 | `FAILED_PRECONDITION` | Position limit exceeded, self-cross blocked, trading disabled (operator kill-switch), or the exposure the exchange's risk parameters put on the order would push consumed cash past one of the pool's bounds — the desk's House limit, the House remainder, the member's allocation, or what the exchange still has available (see [GetCashLimit](#sdk-get_cash_limit)) |
 | 500 | `INTERNAL` | Unexpected error |
 | 503 | `UNAVAILABLE` | DB unavailable, system not operational |
 | 504 | `DEADLINE_EXCEEDED` | M7 did not acknowledge within `system.order_ack_timeout_ms` (default 2s) |
@@ -135,9 +135,10 @@ Identical to REST: integer fixed-point on the wire, no floating-point. The full 
 | `contract_id` (contract / watch) | `string` | M7 string ID | `""` |
 | RFC 3339 timestamps | `string` | — | `""` |
 | Unix-ms timestamps | `int64` | UTC | `0` |
+| `Contract.ref_px_cents` | `optional sint64` | Cents (CCY/MWh × 100); may be negative | field not present |
 
 > [!NOTE]
-> Proto3 has no null scalars. A handful of fields use `google.protobuf.Int64Value` / `UInt32Value` / `StringValue` / `BoolValue` wrappers when "absent" must be distinguished from "zero"; see `ModifyOrderRequest` and `PatchMemberRequest`. The full unit table is on the [REST page](rest_api_v1.md#units).
+> Proto3 has no null scalars. A handful of fields use `google.protobuf.Int64Value` / `UInt32Value` / `StringValue` / `BoolValue` wrappers when "absent" must be distinguished from "zero"; see `ModifyOrderRequest` and `PatchMemberRequest`. Response messages use proto3 field presence (`optional`) for the same purpose — `CashLimit` and `Contract.ref_px_cents` — so read them with `HasField` rather than comparing against `0`. The full unit table is on the [REST page](rest_api_v1.md#units).
 
 ## Python SDK
 
@@ -323,6 +324,9 @@ Modify, activate, or deactivate (hibernate) an existing order. `price` / `quanti
 > [!CAUTION]
 > An unset `action` field is `MODIFY_UNSPECIFIED` (the proto3 zero value), which the server treats as `MODIFY`. Always set `action` explicitly.
 
+> [!WARNING]
+> **A hibernated order holds no exposure, and `ACTIVATE` is a full pre-trade entry.** The exchange releases a hibernated order's cash allocation and re-enters it as a new order on activation, so hibernated orders are excluded from both the cash and the position sums. `ACTIVATE` therefore runs the whole gate — position limits (House and member), cash limits, and self-trade prevention — with the same rejections as [`submit_order`](#sdk-submit_order), and can be refused. `DEACTIVATE` only removes exposure and is never refused on a limit. A `MODIFY` on an order that is already hibernated changes no live exposure and is likewise not measured against the limits; the size it comes back with is checked when it is activated.
+
 #### Returns
 
 `ModifyOrderResponse`: returned once M7 **acknowledges receipt** of the modify. `ABORTED` if M7 rejects it (e.g. the order was concurrently filled or deleted), `DEADLINE_EXCEEDED` if no acknowledgement arrives within `system.order_ack_timeout_ms`. The resulting order state is delivered via `WatchOrder` / `WatchOrders`.
@@ -464,7 +468,7 @@ Look up tradeable contracts and their order books.
 
 _Permission: (authenticated)_
 
-List every known contract for an area, ordered by `dlvry_start` ascending. Returns full `Contract` messages including state and the order book; call `get_contract` when you also need the caller's own orders, trades, and net position (`ContractDetail`). The `buy`/`sell` arrays are per-order book rows (`ObEntry`: `price`, `quantity`, `order_id`, `order_entry_time`, `order_execution_restriction`, `order_type`, the same row shape as REST; multiple rows can share a price). The `state` enum maps the three known M7 codes (`ACTI`/`SUSP`/`CLOS`) and degrades anything else to `CONTRACT_STATE_UNSPECIFIED`; the companion `state_raw` field always carries the verbatim M7 4-char code (parity with the REST `state` string). `predefined` is `false` for a **user-defined block** contract, on which the exchange rejects regular limit orders (M7 error 1051): only block orders are accepted; do not offer regular order entry there. Note: proto3 cannot represent an unset bool, so a contract whose metadata has not yet arrived also serializes as `predefined=false`. Treat `predefined=false` as block-only only for contracts that otherwise carry full metadata (or read REST/WS, where the field is `null` until known).
+List every known contract for an area, ordered by `dlvry_start` ascending. Returns full `Contract` messages including state and the order book; call `get_contract` when you also need the caller's own orders, trades, and net position (`ContractDetail`). The `buy`/`sell` arrays are per-order book rows (`ObEntry`: `price`, `quantity`, `order_id`, `order_entry_time`, `order_execution_restriction`, `order_type`, the same row shape as REST; multiple rows can share a price). The `state` enum maps the three known M7 codes (`ACTI`/`SUSP`/`CLOS`) and degrades anything else to `CONTRACT_STATE_UNSPECIFIED`; the companion `state_raw` field always carries the verbatim M7 4-char code (parity with the REST `state` string). `predefined` is `false` for a **user-defined block** contract, on which the exchange rejects regular limit orders (M7 error 1051): only block orders are accepted; do not offer regular order entry there. Note: proto3 cannot represent an unset bool, so a contract whose metadata has not yet arrived also serializes as `predefined=false`. Treat `predefined=false` as block-only only for contracts that otherwise carry full metadata (or read REST/WS, where the field is `null` until known). `Contract` also carries the exchange's reference price for the contract in that delivery area: `ref_px_cents` (cents, the same scale as `price`), `ref_px_type` (`"C"` closing — the exchange's default — or `"O"` opening, whichever the contract carries), `ref_px_date` (`YYYY-MM-DD`) and `ref_px_updated_ms`. The four move together and are absent until the exchange publishes a price; `ref_px_cents` uses proto3 field presence because `0` and negative are real prices, so test it with `HasField`, while the two strings and the timestamp use the schema's `""` / `0` sentinels. Reference data for the trader — it is not what [P&L](#sdk-get_pnl) marks open positions against.
 
 #### Arguments
 
@@ -639,7 +643,7 @@ None.
 
 #### Returns
 
-`SystemStatus`: `throttling` (`ThrottlingStatus`, same message as [`GetThrottling`](#sdk-get_throttling)), `trading_enabled` (`bool`; the kill-switch state, same as `GetTradingAllowed`), `operational` (`bool`), `cash_limits` (repeated `CashLimit`, same as [`GetCashLimits`](#sdk-get_cash_limits)), `order_pos_limit` (`sint32`, sub-MW; same as `GetContractLimit`), `cash_limit` (`CashLimitStatus` with the six `int64` cents fields `eur_limit_cents` / `eur_consumed_cents` / `eur_remaining_cents` / `gbp_limit_cents` / `gbp_consumed_cents` / `gbp_remaining_cents`; `remaining = limit − consumed`, a `*_limit_cents` of `0` means that pool is not enforced), and `license` (`LicenseView`, identical to the [`GetState`](#sdk-get_state) license projection).
+`SystemStatus`: `throttling` (`ThrottlingStatus`, same message as [`GetThrottling`](#sdk-get_throttling)), `trading_enabled` (`bool`; the kill-switch state, same as `GetTradingAllowed`), `operational` (`bool`), `cash_limits` (repeated `CashLimit`, same as [`GetCashLimits`](#sdk-get_cash_limits)), `order_pos_limit` (`sint32`, sub-MW; same as `GetContractLimit`), `cash_limit` (`CashLimitStatus`: the six `int64` cents fields `eur_limit_cents` / `eur_consumed_cents` / `eur_remaining_cents` / `gbp_limit_cents` / `gbp_consumed_cents` / `gbp_remaining_cents`, where `*_limit_cents` is the effective House limit and `remaining = limit − consumed`, a `0` limit meaning no order may add exposure in that pool; plus `eur_pool` / `gbp_pool` (`CashPool`) carrying where that limit came from, the same shape [`GetCashLimit`](#sdk-get_cash_limit) returns), and `license` (`LicenseView`, identical to the [`GetState`](#sdk-get_state) license projection).
 
 #### Example
 
@@ -838,31 +842,41 @@ client.set_contract_limit(quantity=50000)   # 50 MW
 
 _Permission: (authenticated)_
 
-Read the **global** (overarching-member) cash limit for both currency pools. Mirrors REST `GET /api/v1/cash_limit`. Distinct from `get_cash_limits()` (plural), the read-only M7-supplied per-currency feed.
+Read the desk's cash limit for both currency pools. **The limit is ECC's:** ECC gives the Trading Participant a Cash Limit per settlement currency — the maximum financial exposure it may build between two ECC Booking Cuts (ECC Risk Management Services R55 §3.11/§3.12) — and the gateway receives it from M7. An operator cap can only tighten it. Mirrors REST `GET /api/v1/cash_limit`. Distinct from `get_cash_limits()` (plural), the raw M7 feed.
 
 #### Returns
 
-`CashLimitResponse { sint64 cents, sint64 gbp_cents }`: EUR + GBP pools in cents (`0` = not enforced). The two are independent (ECC settles them separately).
+`CashLimitResponse { CashPool eur, CashPool gbp }`. Each `CashPool` carries `ecc_limit_cents` (`Int64Value`, unset when the exchange has reported none), `ecc_revision` (`Int64Value`), `ecc_effective_from` (`string` — the date that record takes effect, `YYYY-MM-DD` in the exposure timezone; the exchange sends it as an instant, so the calendar day it names depends on that zone. `""` when not reported or unreadable; the raw exchange value is on `GetCashLimits`), `m7_remaining_cents` (`Int64Value` — what the exchange still has available, already net of the desk's own open orders and trades), `cap_cents` (`Int64Value`, unset = no cap; `0` = a deliberate cap of zero), `house_cents` (`sint64` = `min(ecc_limit_cents, cap_cents)`, the number every check uses), `cap_above_ecc` (`bool` — a standing cap the exchange has since dropped below; the cap is left untouched and the ECC limit binds) and `breached` (`bool` — the exchange reports the pool's current limit below zero and has deactivated every order in that currency). The House limit is then **partitioned**: `allocated_cents` (`sint64`) is what the virtual members hold between them, active and inactive alike, and `unallocated_cents` (`sint64` = `house_cents − allocated_cents`) is what is left for orders placed on the House account itself — it can go negative, flagged by `over_allocated` (`bool`), when the exchange lowers its limit under allocations already granted. An ECC limit the exchange has not reported counts as **zero**: no order may add exposure in that pool. The two pools are independent (ECC settles them separately).
+
+**How much an order or trade consumes.** The exchange publishes a *risk set* per product and delivery area: eight price-dependent `a` parameters and four price-independent `alpha` parameters. One leg consumes `a[case] × signed price × MWh + alpha[case] × MWh`, where `case` is chosen by side, price sign, and whether the exposure comes from a resting order or an executed trade. Voltnir reads those parameters from the exchange and prices with them, so its arithmetic is the exchange's arithmetic. A resting order never contributes a credit — its exposure is floored at zero — and every figure scales with the contract's delivery duration, so a 15-minute leg counts a quarter of the hourly amount.
+
+On the exchange's default risk set this reproduces ECC RM R55 §3.11 exactly: a buy at a positive price consumes its value, a trade moves the limit by its full signed value, and the risk-free order cases (sell at a positive price, buy at a negative price) cost nothing. A GB delivery area is assigned a risk set carrying ECC's *GB Price Independent Delivery Risk Parameter* as its `alpha` sell value, which is why §3.12 says GB sells also decrease the limit — and a GB risk set may charge the price term on a negative-price sell on top of that add-on, and decline to credit a negative-price buy trade.
+
+Until the exchange has published a risk set for a contract's product and area, Voltnir prices the leg with a stand-in rather than at zero: ECC's EUR rules for a non-GBP area, and the operator-configured GBP delivery-risk rate (`cash_limit.gbp_sell_reservation_*`) for a GBP one, logged once per delivery area.
 
 #### Example
 
 ```
-resp = client.get_cash_limit()
-print("cash limit:", resp.cents, "EUR cents")
+eur = client.get_cash_limit().eur
+print("house limit:", eur.house_cents, "EUR cents")
 ```
 
-### `Unary` `client.set_cash_limit(cents=…)`
+### `Unary` `client.set_cash_limit(cap_cents=…)`
 
 _Permission: set_cash_limit_
 
-Update a global cash pool (caps the monetary value of executed trades + open orders). Applies immediately to subsequent `submit_order` / `modify_order` validation. Every per-member cash limit is capped at the global value. `currency` selects the pool (EUR and GBP are independent).
+Set or clear the **operator cap** on one cash pool. The House limit itself comes from ECC and is not settable here; a cap only ever tightens it. Applies immediately to subsequent `submit_order` / `modify_order` validation. `currency` selects the pool (EUR and GBP are independent).
 
 #### Arguments
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cents` | `sint64` | Yes | New cash limit in cents of the target currency. Negative values are rejected. `0` disables that pool. |
+| `cap_cents` | `Int64Value` | No | New cap in cents of the target currency. Must be ≥ 0 and at or below the ECC limit. Unset removes the cap; `0` is a deliberate cap of zero (no trading in that pool). |
 | `currency` | `string` | No | `"eur"` (default) or `"gbp"`. Unknown values return `INVALID_ARGUMENT`. |
+
+#### Errors
+
+`INVALID_ARGUMENT` for a negative cap, a cap above the ECC limit (**rejected, never clamped** — the message names the pool and both amounts), a cap set before the exchange has reported a limit to tighten, a cap that would leave `house_cents` below `allocated_cents` (Voltnir never shrinks a member's allocation on its own — lower the member allocations first), or an unknown currency. Nothing is written on a rejection. Clearing a cap is always accepted.
 
 #### Returns
 
@@ -871,46 +885,8 @@ Update a global cash pool (caps the monetary value of executed trades + open ord
 #### Example
 
 ```
-client.set_cash_limit(cents=10000000)                  # €100,000 (EUR pool)
-client.set_cash_limit(cents=5000000, currency="gbp")  # £50,000 (GBP pool)
-```
-
-### `Unary` `client.get_cash_fail_closed()`
-
-_Permission: (authenticated)_
-
-Read the cash-limit **fail-closed** switch. Mirrors REST `GET /api/v1/cash_fail_closed`. Enabled by default (ECC parity, §3.11/§3.12): a `0`/unset cash limit means *no trading* in that pool rather than "disabled". Disable it to opt into Voltnir's historical fail-open semantics.
-
-#### Returns
-
-`CashFailClosedResponse { bool enabled }`.
-
-#### Example
-
-```
-print("fail-closed:", client.get_cash_fail_closed().enabled)
-```
-
-### `Unary` `client.set_cash_fail_closed(enabled=…)`
-
-_Permission: set_cash_limit_
-
-Set the cash-limit fail-closed switch (part of the cash-limit control, so gated by `set_cash_limit`). Applies immediately to subsequent `submit_order` / `modify_order` validation. With `enabled=True`, a `0`/unset limit in a pool rejects all exposure-adding orders in that pool; with `enabled=False` a `0` limit disables the pool's check (unbounded).
-
-#### Arguments
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `enabled` | `bool` | Yes | `true` = ECC fail-closed; `false` = disabled-on-zero. |
-
-#### Returns
-
-`CashFailClosedResponse` with the new state.
-
-#### Example
-
-```
-client.set_cash_fail_closed(enabled=True)   # ECC parity: 0 limit = no trading
+client.set_cash_limit(cap_cents=5000000)                  # cap the EUR pool at €50,000
+client.set_cash_limit(cap_cents=None, currency="gbp")    # remove the GBP cap
 ```
 
 ### `Unary` `client.get_holidays()`
@@ -1140,7 +1116,7 @@ List the virtual members assigned to the caller.
 
 #### Returns
 
-`MemberListResponse { repeated Member members }`. Each `Member` carries `id` / `short_id` / `name` / `max_position` (`sint64`, sub-MW) / `active` (`bool`), the configured overrides `cash_limit` / `cash_limit_gbp` (`sint64` cents; `0` = none), and the live cash-usage trio per pool: `eur_consumed_cents` / `eur_limit_cents` / `eur_remaining_cents` and the `gbp_*` equivalents (all `sint64` cents). `consumed` is the member's open-order + executed-trade exposure; `*_limit_cents` is the **effective** cap (the override capped at the global limit, or the inherited global when there is no override, so it need not equal `cash_limit`); `remaining = limit − consumed` (negative when over, a `*_limit_cents` of `0` means that pool is not enforced). Same shape and semantics as REST `GET /api/v1/members` and the WS `get_members` response.
+`MemberListResponse { repeated Member members }`. Each `Member` carries `id` / `short_id` / `name` / `max_position` (`sint64`, sub-MW) / `active` (`bool`), the member's allocations `cash_limit` / `cash_limit_gbp` (`sint64` cents; `0` = no allocation), and the live cash-usage trio per pool: `eur_consumed_cents` / `eur_limit_cents` / `eur_remaining_cents` and the `gbp_*` equivalents (all `sint64` cents). `consumed` is the member's open-order + executed-trade exposure; `*_limit_cents` is the allocation as the enforced limit — no inheritance from the desk and no clamping to it, so it always equals `cash_limit`; `remaining = limit − consumed` (negative when over, a `*_limit_cents` of `0` means the member holds no allocation and no order may add exposure in that pool). Same shape and semantics as REST `GET /api/v1/members` and the WS `get_members` response.
 
 #### Example
 
@@ -1341,12 +1317,15 @@ Create a new virtual member. The `short_id` is generated server-side (`VM001`, `
 | --- | --- | --- | --- |
 | `name` | `string` | Yes | Display name. |
 | `max_position` | `sint64` | Yes | Position cap in sub-MW. |
-| `cash_limit` | `sint64` | No | Per-member cash limit in EUR cents. Default `0` (no override → global applies); always capped at the global limit. |
-| `cash_limit_gbp` | `sint64` | No | Per-member GBP cash limit in GBP cents. Default `0` (no override → global GBP limit applies). |
+| `cash_limit` | `sint64` | No | The member's allocation out of the desk's EUR cash limit, in EUR cents. Default `0`, which means **no allocation**: the member cannot add EUR exposure at all. `INVALID_ARGUMENT` when it would push the pool's allocations past the desk's House limit, or when the exchange has reported no EUR limit to allocate out of. |
+| `cash_limit_gbp` | `sint64` | No | The member's allocation in the independent GBP pool, in GBP cents. Same rules; default `0` = no allocation. |
 
 #### Returns
 
-`Member`: the newly-created record (full field set per [`get_my_members`](#sdk-get_my_members)). A fresh member has no orders/trades yet, so its `*_consumed_cents` are `0` and `*_remaining_cents` equal the effective `*_limit_cents`.
+`Member`: the newly-created record (full field set per [`get_my_members`](#sdk-get_my_members)). A fresh member has no orders/trades yet, so its `*_consumed_cents` are `0` and `*_remaining_cents` equal its allocation.
+
+> [!WARNING]
+> Per currency, the allocations of **all** members sum to at most the desk's `house_cents` — inactive members included, since the exchange does not release an idle member's share either. That is what makes one member unable to spend another's allocation. Orders with no member tag draw on the remainder (`unallocated_cents` on [`get_cash_limit`](#sdk-get_cash_limit)) and nothing more.
 
 #### Example
 
@@ -1368,8 +1347,8 @@ Partial update: only fields that are explicitly set on the wire are applied. Use
 | `id` | `string` | Yes | Target member **UUID** (`Member.id`), not the `VM…` short_id. |
 | `name` | `StringValue` | No | New display name. |
 | `max_position` | `Int64Value` | No | New position cap (sub-MW). |
-| `cash_limit` | `Int64Value` | No | New per-member cash limit in EUR cents (`0` clears the override). The field the overarching member lowers when next-window collateral is insufficient. |
-| `cash_limit_gbp` | `Int64Value` | No | New per-member GBP cash limit in GBP cents (`0` clears the override). |
+| `cash_limit` | `Int64Value` | No | New EUR allocation in EUR cents. `0` takes the allocation away, so the member can no longer add EUR exposure; that always succeeds. Raising it is `INVALID_ARGUMENT` when the pool's allocations would then exceed the desk's House limit — the member's own current allocation is not counted against the value replacing it, so a member can always be raised into the unallocated remainder. This is the field the desk lowers when next-window collateral is insufficient. |
+| `cash_limit_gbp` | `Int64Value` | No | New GBP allocation in GBP cents. Same rules, in the independent GBP pool. |
 | `active` | `BoolValue` | No | Activate / deactivate the member. |
 
 #### Returns
@@ -1558,6 +1537,37 @@ for item in page.items:
     print(item.json)
 ```
 
+### `Unary` `client.list_exchange_messages(**kwargs)`
+
+_Permission: read_m7_errors_
+
+Page through the **exchange-message log**: the append-only record of what the exchange itself said — cash-limit breaches, market and delivery-area halts, member suspensions, failover notices, automated order transfers. The companion to `query_m7_errors`: one is what the exchange *says*, the other what goes *wrong*. Gated by the **same `read_m7_errors`** permission; **no new permission**. Mirrors REST `GET /api/v1/audit/exchange_messages` and WS `list_exchange_messages`.
+
+Messages the exchange marks non-persistent are streamed on `watch_exchange_messages` but never stored, so they never appear in this result.
+
+#### Arguments
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` | No | `""` on the first page; pass back the previous response's `next_cursor`. |
+| `limit` | `uint32` | No | Page size. `0` (or unset) == default `50`; capped at `200`. (REST and WS reject an explicit `limit=0` instead, since proto3 cannot distinguish unset from 0.) |
+| `date_from` / `date_to` | `string` | No | RFC 3339: inclusive window on receive time. `""` = unbounded. |
+| `severity` | `string` | No | `urgent`, `error`, `high`, `medium`, `low`, or `unknown` for a severity the exchange has not documented. `""` = no filter. |
+| `scope` | `string` | No | `public` (market-wide) or `private` (this member). `""` = no filter. |
+| `code` | `int64` | No | Vendor message code filter, e.g. `158`. `0` (or unset) == no filter. |
+
+#### Returns
+
+`ListExchangeMessagesResponse { repeated ExchangeMessageItem items, string next_cursor, uint64 total_hint }`; each `item.json` is the exchange_messages row serialised as JSON, carrying `id` (`null` when the message was streamed but not stored), `msg_id`, `scope`, `code`, `key`, `severity`, `text` (placeholders substituted), `product`, `account_id`, `buy_area`, `sell_area`, `market_supervision` and `vars`. `total_hint` of `0` means not available on this page.
+
+#### Example
+
+```
+page = client.list_exchange_messages(limit=100, severity="error", code=158)
+for item in page.items:
+    print(item.json)
+```
+
 ## SDK reference: Streaming
 
 13 server-streaming RPCs. Sync versions return a regular iterator; async versions return an `AsyncIterator`. Cancel by exiting the loop or calling `stream.cancel()`. See [Streaming semantics](#streaming) for the protocol-level rules (snapshot-first, lag recovery, terminal closure).
@@ -1642,7 +1652,7 @@ Treat any `SNAPSHOT` after the initial one as a **start-over** signal: the serve
 
 #### Returns
 
-`Iterator[ContractEvent]`: each event has `type` ∈ {`SNAPSHOT`, `ORDER_BOOK_UPDATE`, `STATE_CHANGE`, `TRADE`} and a full `Contract` body. `ORDER_BOOK_UPDATE` fires on order-book mutations, `STATE_CHANGE` on contract metadata / lifecycle mutations (`ContractInfoRprt` path), and `TRADE` whenever a trade touches the contract; own executions and public-tape trades both fire, deduplicated on `(trade_id, revision_no)` since an own execution is usually mirrored on the public tape. When the contract is deleted, tombstoned, or deactivated the stream emits a final `STATE_CHANGE` and closes.
+`Iterator[ContractEvent]`: each event has `type` ∈ {`SNAPSHOT`, `ORDER_BOOK_UPDATE`, `STATE_CHANGE`, `TRADE`} and a full `Contract` body. `ORDER_BOOK_UPDATE` fires on order-book mutations, `STATE_CHANGE` on contract metadata / lifecycle mutations (`ContractInfoRprt` path), and `TRADE` whenever a trade touches the contract; own executions and public-tape trades both fire, deduplicated on `(trade_id, revision_no)` since an own execution is usually mirrored on the public tape. When the contract is deleted, tombstoned, or deactivated the stream emits a final `STATE_CHANGE` and closes. A new or changed exchange reference price (`ref_px_*`, see [`list_contracts`](#sdk-list_contracts)) arrives as a `STATE_CHANGE` carrying the updated `Contract`; a price that has not changed emits nothing.
 
 #### Example
 
@@ -1802,6 +1812,20 @@ Live tail of the M7 exchange-error log, the streaming companion to `query_m7_err
 #### Returns
 
 `Iterator[M7ErrorItem]`
+
+### `Server Stream` `client.watch_exchange_messages()`
+
+_Authenticated_
+
+Live tail of the exchange's own message feed, the streaming companion to `list_exchange_messages`. Pushed on receipt, no polling, no snapshot — seed history via `list_exchange_messages` and de-duplicate the tail on `msg_id`.
+
+**Authenticated-only, no permission**: the halts and suspensions on this feed are what every trader on the desk has to see the moment they land, and the private messages are already scoped to this member by the exchange. The history of the same log is gated (`read_m7_errors`) because history is a compliance read.
+
+The stream also carries the messages the exchange marks non-persistent, which are never stored: their `id` is `null` and they cannot be re-fetched, so a client that needs them must be subscribed when they arrive.
+
+#### Returns
+
+`Iterator[ExchangeMessageItem]`
 
 ## verify.py runner
 

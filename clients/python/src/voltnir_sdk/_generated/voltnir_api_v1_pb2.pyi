@@ -264,7 +264,7 @@ class TradeDetail(_message.Message):
     def __init__(self, order_id: _Optional[int] = ..., client_order_id: _Optional[str] = ..., delivery_area: _Optional[str] = ..., account_id: _Optional[str] = ..., user_code: _Optional[str] = ...) -> None: ...
 
 class Contract(_message.Message):
-    __slots__ = ("contract_id", "area_id", "prod", "name", "long_name", "dlvry_start", "dlvry_end", "predefined", "revision_no", "revision_ob", "state", "trading_phase", "trading_phase_start", "trading_phase_end", "duration", "last_price", "last_quantity", "last_trade_time", "highest_price", "lowest_price", "price_direction", "best_bid", "best_bid_qty", "best_ask", "best_ask_qty", "buy", "sell", "state_raw")
+    __slots__ = ("contract_id", "area_id", "prod", "name", "long_name", "dlvry_start", "dlvry_end", "predefined", "revision_no", "revision_ob", "state", "trading_phase", "trading_phase_start", "trading_phase_end", "duration", "last_price", "last_quantity", "last_trade_time", "highest_price", "lowest_price", "price_direction", "best_bid", "best_bid_qty", "best_ask", "best_ask_qty", "buy", "sell", "state_raw", "ref_px_cents", "ref_px_type", "ref_px_date", "ref_px_updated_ms")
     CONTRACT_ID_FIELD_NUMBER: _ClassVar[int]
     AREA_ID_FIELD_NUMBER: _ClassVar[int]
     PROD_FIELD_NUMBER: _ClassVar[int]
@@ -293,6 +293,10 @@ class Contract(_message.Message):
     BUY_FIELD_NUMBER: _ClassVar[int]
     SELL_FIELD_NUMBER: _ClassVar[int]
     STATE_RAW_FIELD_NUMBER: _ClassVar[int]
+    REF_PX_CENTS_FIELD_NUMBER: _ClassVar[int]
+    REF_PX_TYPE_FIELD_NUMBER: _ClassVar[int]
+    REF_PX_DATE_FIELD_NUMBER: _ClassVar[int]
+    REF_PX_UPDATED_MS_FIELD_NUMBER: _ClassVar[int]
     contract_id: str
     area_id: str
     prod: str
@@ -321,7 +325,11 @@ class Contract(_message.Message):
     buy: _containers.RepeatedCompositeFieldContainer[ObEntry]
     sell: _containers.RepeatedCompositeFieldContainer[ObEntry]
     state_raw: str
-    def __init__(self, contract_id: _Optional[str] = ..., area_id: _Optional[str] = ..., prod: _Optional[str] = ..., name: _Optional[str] = ..., long_name: _Optional[str] = ..., dlvry_start: _Optional[str] = ..., dlvry_end: _Optional[str] = ..., predefined: bool = ..., revision_no: _Optional[int] = ..., revision_ob: _Optional[int] = ..., state: _Optional[_Union[ContractState, str]] = ..., trading_phase: _Optional[str] = ..., trading_phase_start: _Optional[str] = ..., trading_phase_end: _Optional[str] = ..., duration: _Optional[str] = ..., last_price: _Optional[int] = ..., last_quantity: _Optional[int] = ..., last_trade_time: _Optional[str] = ..., highest_price: _Optional[int] = ..., lowest_price: _Optional[int] = ..., price_direction: _Optional[int] = ..., best_bid: _Optional[int] = ..., best_bid_qty: _Optional[int] = ..., best_ask: _Optional[int] = ..., best_ask_qty: _Optional[int] = ..., buy: _Optional[_Iterable[_Union[ObEntry, _Mapping]]] = ..., sell: _Optional[_Iterable[_Union[ObEntry, _Mapping]]] = ..., state_raw: _Optional[str] = ...) -> None: ...
+    ref_px_cents: int
+    ref_px_type: str
+    ref_px_date: str
+    ref_px_updated_ms: int
+    def __init__(self, contract_id: _Optional[str] = ..., area_id: _Optional[str] = ..., prod: _Optional[str] = ..., name: _Optional[str] = ..., long_name: _Optional[str] = ..., dlvry_start: _Optional[str] = ..., dlvry_end: _Optional[str] = ..., predefined: bool = ..., revision_no: _Optional[int] = ..., revision_ob: _Optional[int] = ..., state: _Optional[_Union[ContractState, str]] = ..., trading_phase: _Optional[str] = ..., trading_phase_start: _Optional[str] = ..., trading_phase_end: _Optional[str] = ..., duration: _Optional[str] = ..., last_price: _Optional[int] = ..., last_quantity: _Optional[int] = ..., last_trade_time: _Optional[str] = ..., highest_price: _Optional[int] = ..., lowest_price: _Optional[int] = ..., price_direction: _Optional[int] = ..., best_bid: _Optional[int] = ..., best_bid_qty: _Optional[int] = ..., best_ask: _Optional[int] = ..., best_ask_qty: _Optional[int] = ..., buy: _Optional[_Iterable[_Union[ObEntry, _Mapping]]] = ..., sell: _Optional[_Iterable[_Union[ObEntry, _Mapping]]] = ..., state_raw: _Optional[str] = ..., ref_px_cents: _Optional[int] = ..., ref_px_type: _Optional[str] = ..., ref_px_date: _Optional[str] = ..., ref_px_updated_ms: _Optional[int] = ...) -> None: ...
 
 class ContractDetail(_message.Message):
     __slots__ = ("contract", "orders_acknowledged", "trades", "net_pos", "orders_pending")
@@ -664,20 +672,24 @@ class SystemStatus(_message.Message):
     def __init__(self, throttling: _Optional[_Union[ThrottlingStatus, _Mapping]] = ..., trading_enabled: bool = ..., operational: bool = ..., cash_limits: _Optional[_Iterable[_Union[CashLimit, _Mapping]]] = ..., order_pos_limit: _Optional[int] = ..., cash_limit: _Optional[_Union[CashLimitStatus, _Mapping]] = ..., license: _Optional[_Union[LicenseView, _Mapping]] = ...) -> None: ...
 
 class CashLimitStatus(_message.Message):
-    __slots__ = ("eur_limit_cents", "eur_consumed_cents", "eur_remaining_cents", "gbp_limit_cents", "gbp_consumed_cents", "gbp_remaining_cents")
+    __slots__ = ("eur_limit_cents", "eur_consumed_cents", "eur_remaining_cents", "gbp_limit_cents", "gbp_consumed_cents", "gbp_remaining_cents", "eur_pool", "gbp_pool")
     EUR_LIMIT_CENTS_FIELD_NUMBER: _ClassVar[int]
     EUR_CONSUMED_CENTS_FIELD_NUMBER: _ClassVar[int]
     EUR_REMAINING_CENTS_FIELD_NUMBER: _ClassVar[int]
     GBP_LIMIT_CENTS_FIELD_NUMBER: _ClassVar[int]
     GBP_CONSUMED_CENTS_FIELD_NUMBER: _ClassVar[int]
     GBP_REMAINING_CENTS_FIELD_NUMBER: _ClassVar[int]
+    EUR_POOL_FIELD_NUMBER: _ClassVar[int]
+    GBP_POOL_FIELD_NUMBER: _ClassVar[int]
     eur_limit_cents: int
     eur_consumed_cents: int
     eur_remaining_cents: int
     gbp_limit_cents: int
     gbp_consumed_cents: int
     gbp_remaining_cents: int
-    def __init__(self, eur_limit_cents: _Optional[int] = ..., eur_consumed_cents: _Optional[int] = ..., eur_remaining_cents: _Optional[int] = ..., gbp_limit_cents: _Optional[int] = ..., gbp_consumed_cents: _Optional[int] = ..., gbp_remaining_cents: _Optional[int] = ...) -> None: ...
+    eur_pool: CashPool
+    gbp_pool: CashPool
+    def __init__(self, eur_limit_cents: _Optional[int] = ..., eur_consumed_cents: _Optional[int] = ..., eur_remaining_cents: _Optional[int] = ..., gbp_limit_cents: _Optional[int] = ..., gbp_consumed_cents: _Optional[int] = ..., gbp_remaining_cents: _Optional[int] = ..., eur_pool: _Optional[_Union[CashPool, _Mapping]] = ..., gbp_pool: _Optional[_Union[CashPool, _Mapping]] = ...) -> None: ...
 
 class LicenseView(_message.Message):
     __slots__ = ("status_kind", "status_days", "license_id", "mode", "environment", "expires_at", "issued_at", "schema_version", "issuer", "signing_key_id", "holder", "epex_any", "epex_identities")
@@ -828,36 +840,46 @@ class GetCashLimitRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class SetCashLimitRequest(_message.Message):
-    __slots__ = ("cents", "currency")
-    CENTS_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("currency", "cap_cents")
     CURRENCY_FIELD_NUMBER: _ClassVar[int]
-    cents: int
+    CAP_CENTS_FIELD_NUMBER: _ClassVar[int]
     currency: str
-    def __init__(self, cents: _Optional[int] = ..., currency: _Optional[str] = ...) -> None: ...
+    cap_cents: _wrappers_pb2.Int64Value
+    def __init__(self, currency: _Optional[str] = ..., cap_cents: _Optional[_Union[_wrappers_pb2.Int64Value, _Mapping]] = ...) -> None: ...
 
 class CashLimitResponse(_message.Message):
-    __slots__ = ("cents", "gbp_cents")
-    CENTS_FIELD_NUMBER: _ClassVar[int]
-    GBP_CENTS_FIELD_NUMBER: _ClassVar[int]
-    cents: int
-    gbp_cents: int
-    def __init__(self, cents: _Optional[int] = ..., gbp_cents: _Optional[int] = ...) -> None: ...
+    __slots__ = ("eur", "gbp")
+    EUR_FIELD_NUMBER: _ClassVar[int]
+    GBP_FIELD_NUMBER: _ClassVar[int]
+    eur: CashPool
+    gbp: CashPool
+    def __init__(self, eur: _Optional[_Union[CashPool, _Mapping]] = ..., gbp: _Optional[_Union[CashPool, _Mapping]] = ...) -> None: ...
 
-class GetCashFailClosedRequest(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
-
-class SetCashFailClosedRequest(_message.Message):
-    __slots__ = ("enabled",)
-    ENABLED_FIELD_NUMBER: _ClassVar[int]
-    enabled: bool
-    def __init__(self, enabled: bool = ...) -> None: ...
-
-class CashFailClosedResponse(_message.Message):
-    __slots__ = ("enabled",)
-    ENABLED_FIELD_NUMBER: _ClassVar[int]
-    enabled: bool
-    def __init__(self, enabled: bool = ...) -> None: ...
+class CashPool(_message.Message):
+    __slots__ = ("ecc_limit_cents", "ecc_revision", "ecc_effective_from", "m7_remaining_cents", "cap_cents", "house_cents", "cap_above_ecc", "breached", "allocated_cents", "unallocated_cents", "over_allocated")
+    ECC_LIMIT_CENTS_FIELD_NUMBER: _ClassVar[int]
+    ECC_REVISION_FIELD_NUMBER: _ClassVar[int]
+    ECC_EFFECTIVE_FROM_FIELD_NUMBER: _ClassVar[int]
+    M7_REMAINING_CENTS_FIELD_NUMBER: _ClassVar[int]
+    CAP_CENTS_FIELD_NUMBER: _ClassVar[int]
+    HOUSE_CENTS_FIELD_NUMBER: _ClassVar[int]
+    CAP_ABOVE_ECC_FIELD_NUMBER: _ClassVar[int]
+    BREACHED_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATED_CENTS_FIELD_NUMBER: _ClassVar[int]
+    UNALLOCATED_CENTS_FIELD_NUMBER: _ClassVar[int]
+    OVER_ALLOCATED_FIELD_NUMBER: _ClassVar[int]
+    ecc_limit_cents: _wrappers_pb2.Int64Value
+    ecc_revision: _wrappers_pb2.Int64Value
+    ecc_effective_from: str
+    m7_remaining_cents: _wrappers_pb2.Int64Value
+    cap_cents: _wrappers_pb2.Int64Value
+    house_cents: int
+    cap_above_ecc: bool
+    breached: bool
+    allocated_cents: int
+    unallocated_cents: int
+    over_allocated: bool
+    def __init__(self, ecc_limit_cents: _Optional[_Union[_wrappers_pb2.Int64Value, _Mapping]] = ..., ecc_revision: _Optional[_Union[_wrappers_pb2.Int64Value, _Mapping]] = ..., ecc_effective_from: _Optional[str] = ..., m7_remaining_cents: _Optional[_Union[_wrappers_pb2.Int64Value, _Mapping]] = ..., cap_cents: _Optional[_Union[_wrappers_pb2.Int64Value, _Mapping]] = ..., house_cents: _Optional[int] = ..., cap_above_ecc: bool = ..., breached: bool = ..., allocated_cents: _Optional[int] = ..., unallocated_cents: _Optional[int] = ..., over_allocated: bool = ...) -> None: ...
 
 class Holiday(_message.Message):
     __slots__ = ("date", "label")
@@ -952,7 +974,7 @@ class GetCashLimitsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class CashLimit(_message.Message):
-    __slots__ = ("currency", "current_limit", "current_revision", "configured_limit", "dec_shft", "lmt_id", "state", "start_date", "revision_no")
+    __slots__ = ("currency", "current_limit", "current_revision", "configured_limit", "dec_shft", "lmt_id", "state", "start_date", "revision_no", "end_date")
     CURRENCY_FIELD_NUMBER: _ClassVar[int]
     CURRENT_LIMIT_FIELD_NUMBER: _ClassVar[int]
     CURRENT_REVISION_FIELD_NUMBER: _ClassVar[int]
@@ -962,6 +984,7 @@ class CashLimit(_message.Message):
     STATE_FIELD_NUMBER: _ClassVar[int]
     START_DATE_FIELD_NUMBER: _ClassVar[int]
     REVISION_NO_FIELD_NUMBER: _ClassVar[int]
+    END_DATE_FIELD_NUMBER: _ClassVar[int]
     currency: str
     current_limit: int
     current_revision: int
@@ -971,7 +994,8 @@ class CashLimit(_message.Message):
     state: str
     start_date: str
     revision_no: int
-    def __init__(self, currency: _Optional[str] = ..., current_limit: _Optional[int] = ..., current_revision: _Optional[int] = ..., configured_limit: _Optional[int] = ..., dec_shft: _Optional[int] = ..., lmt_id: _Optional[str] = ..., state: _Optional[str] = ..., start_date: _Optional[str] = ..., revision_no: _Optional[int] = ...) -> None: ...
+    end_date: str
+    def __init__(self, currency: _Optional[str] = ..., current_limit: _Optional[int] = ..., current_revision: _Optional[int] = ..., configured_limit: _Optional[int] = ..., dec_shft: _Optional[int] = ..., lmt_id: _Optional[str] = ..., state: _Optional[str] = ..., start_date: _Optional[str] = ..., revision_no: _Optional[int] = ..., end_date: _Optional[str] = ...) -> None: ...
 
 class GetCashLimitsResponse(_message.Message):
     __slots__ = ("limits",)
@@ -1439,6 +1463,40 @@ class M7ErrorsResponse(_message.Message):
     total_hint: int
     def __init__(self, items: _Optional[_Iterable[_Union[M7ErrorItem, _Mapping]]] = ..., next_cursor: _Optional[str] = ..., total_hint: _Optional[int] = ...) -> None: ...
 
+class ListExchangeMessagesRequest(_message.Message):
+    __slots__ = ("cursor", "limit", "date_from", "date_to", "severity", "scope", "code")
+    CURSOR_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    DATE_FROM_FIELD_NUMBER: _ClassVar[int]
+    DATE_TO_FIELD_NUMBER: _ClassVar[int]
+    SEVERITY_FIELD_NUMBER: _ClassVar[int]
+    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    CODE_FIELD_NUMBER: _ClassVar[int]
+    cursor: str
+    limit: int
+    date_from: str
+    date_to: str
+    severity: str
+    scope: str
+    code: int
+    def __init__(self, cursor: _Optional[str] = ..., limit: _Optional[int] = ..., date_from: _Optional[str] = ..., date_to: _Optional[str] = ..., severity: _Optional[str] = ..., scope: _Optional[str] = ..., code: _Optional[int] = ...) -> None: ...
+
+class ExchangeMessageItem(_message.Message):
+    __slots__ = ("json",)
+    JSON_FIELD_NUMBER: _ClassVar[int]
+    json: str
+    def __init__(self, json: _Optional[str] = ...) -> None: ...
+
+class ListExchangeMessagesResponse(_message.Message):
+    __slots__ = ("items", "next_cursor", "total_hint")
+    ITEMS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_CURSOR_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_HINT_FIELD_NUMBER: _ClassVar[int]
+    items: _containers.RepeatedCompositeFieldContainer[ExchangeMessageItem]
+    next_cursor: str
+    total_hint: int
+    def __init__(self, items: _Optional[_Iterable[_Union[ExchangeMessageItem, _Mapping]]] = ..., next_cursor: _Optional[str] = ..., total_hint: _Optional[int] = ...) -> None: ...
+
 class ExportRequest(_message.Message):
     __slots__ = ("format", "to", "area", "product")
     FORMAT_FIELD_NUMBER: _ClassVar[int]
@@ -1593,5 +1651,9 @@ class WatchAuditEventsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class WatchM7ErrorsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class WatchExchangeMessagesRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...

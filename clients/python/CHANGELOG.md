@@ -20,8 +20,22 @@ an existing call.
   protobuf `Int64Value` / `UInt32Value` types internally. Repricing previously
   failed with a bare `TypeError` unless the caller imported
   `google.protobuf.wrappers_pb2`.
+- `set_cash_limit` takes `cap_cents` instead of `cents`. The desk's cash limit
+  now comes from the exchange; the value passed here is a cap that only ever
+  tightens it, and one above the exchange's limit is rejected rather than
+  clamped. `cap_cents=None` removes the cap; `cap_cents=0` is a real ceiling of
+  zero.
+- `get_cash_limit` / `set_cash_limit` return one object per pool (`eur`, `gbp`)
+  carrying the exchange's limit and its revision, what the exchange still has
+  available, the cap, and the effective limit every check uses — in place of the
+  flat `cents` / `gbp_cents` pair.
 
 ### Added
+- `list_exchange_messages` / `watch_exchange_messages`, the exchange's own
+  message feed: cash-limit breaches, market and delivery-area halts, member
+  suspensions, failover notices, automated order transfers. The history shares
+  the `read_m7_errors` gate; the live tail is authenticated-only and also
+  carries the messages the exchange does not persist.
 - `OrderOutcomeUnknown`, raised when an order call fails without proving it had
   no effect. Distinguishing this from a definite rejection is what stops a
   retry doubling a position.
@@ -37,6 +51,11 @@ an existing call.
 - `py.typed`, generated `.pyi` stubs, and return annotations on every method. A
   `[typing]` extra supplies `types-protobuf`, without which responses are `Any`.
 - `__version__`.
+
+### Removed
+- `get_cash_fail_closed` / `set_cash_fail_closed`. A cash limit is always
+  enforced: a pool limit of zero means no trading in that pool, and there is no
+  mode in which it means "unbounded".
 
 ### Fixed
 - Abandoning an async stream leaked the server-side subscription, which against
