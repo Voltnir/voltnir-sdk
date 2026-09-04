@@ -824,7 +824,7 @@ Set the cash fail-closed flag, ECC parity (§3.11/§3.12), **enabled by default*
 
 ### `Command` `get_holidays`
 
-Read both ECC bank-holiday calendars (EUR + GBP), used by the cash-limit exposure window (the 16:00 reset rolls over them). EUR and GBP are **independent** calendars (GB bank holidays close CHAPS). Mirrors REST `GET /holidays` and gRPC `GetHolidays`. Authenticated-only.
+Read both ECC bank-holiday calendars (EUR + GBP), used by the cash-limit exposure window (the 16:00 reset rolls over them). Both pools reset on **ECC Business Days** — weekdays minus the TARGET2 closing days (ECC Risk Management Services R55 §3.11/§3.12) — so the same six dates belong in both calendars every year; they are separate lists only so an ad-hoc ECC closure or a non-ECC deployment can be expressed. Mirrors REST `GET /holidays` and gRPC `GetHolidays`. Authenticated-only.
 
 #### Example
 
@@ -850,7 +850,7 @@ Replace one currency's whole holiday calendar. Mirrors REST `PUT /holidays` and 
 
 ```json
 {"action": "set_holidays", "req_id": "…", "currency": "gbp",
- "holidays": [{"date": "2026-08-31", "label": "Summer Bank Holiday"}, {"date": "2026-12-25"}]}
+ "holidays": [{"date": "2026-05-01", "label": "Labour Day"}, {"date": "2026-12-25"}]}
 // → result: {"eur": […], "gbp": […]}  (both calendars after the change)
 ```
 

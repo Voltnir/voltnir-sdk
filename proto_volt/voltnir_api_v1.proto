@@ -782,10 +782,11 @@ message CashFailClosedResponse {
 
 // ---- Bank-holiday calendars (cash-limit exposure window) --------------------
 
-// One configured non-working date for a currency's exposure window. EUR and GBP
-// keep independent calendars (GB bank holidays close CHAPS, so the GBP window
-// rolls over a different set than the EUR/TARGET2 window). Both share the 16:00
-// reset; only the holiday dates differ.
+// One configured non-working date for a currency's exposure window. Both pools
+// reset at 16:00 (ECC clearing timezone) on ECC Business Days — weekdays minus
+// the TARGET2 closing days — so the same dates normally go in both calendars.
+// They are kept separate only so an ad-hoc closure affecting one pool, or a
+// non-ECC deployment, can be expressed.
 message Holiday {
   string date = 1;   // YYYY-MM-DD, local to the exposure-window timezone
   string label = 2;  // optional display label ("" = none); ignored by the math

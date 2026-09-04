@@ -917,7 +917,7 @@ client.set_cash_fail_closed(enabled=True)   # ECC parity: 0 limit = no trading
 
 _Permission: (authenticated)_
 
-Read both ECC **bank-holiday calendars** (EUR + GBP) for the cash-limit exposure window. Mirrors REST `GET /api/v1/holidays`. The cash limit re-bases exposure at 16:00 (ECC tz) each working day; configured holidays extend the window across public holidays. EUR and GBP keep independent calendars (GB bank holidays close CHAPS); both share the 16:00 reset, only the dates differ. Runtime-managed and persisted to the database.
+Read both ECC **bank-holiday calendars** (EUR + GBP) for the cash-limit exposure window. Mirrors REST `GET /api/v1/holidays`. The cash limit re-bases exposure at 16:00 (ECC tz) on each **ECC Business Day** — a weekday that is not a TARGET2 closing day — and the GBP limit resets on the same days as the EUR limit (ECC Risk Management Services R55 §3.12), so the same six TARGET2 dates go in both calendars every year. They are separate lists only so an ad-hoc ECC closure or a non-ECC deployment can be expressed. Runtime-managed and persisted to the database.
 
 #### Returns
 
@@ -952,7 +952,7 @@ Replace one currency's whole calendar (holidays are part of the cash-limit metho
 ```
 from voltnir_sdk._generated import voltnir_api_v1_pb2 as pb
 client.set_holidays(currency="gbp", holidays=[
-    pb.Holiday(date="2026-08-31", label="Summer Bank Holiday"),
+    pb.Holiday(date="2026-05-01", label="Labour Day"),
     pb.Holiday(date="2026-12-25"),
 ])
 ```

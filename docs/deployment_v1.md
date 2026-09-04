@@ -70,6 +70,21 @@ WantedBy=multi-user.target
 > [!NOTE]
 > `KillSignal=SIGINT` matters: the gateway drains its subsystems on **SIGINT** (Ctrl-C). systemd's default `SIGTERM` would kill it without the graceful shutdown path.
 
+#### Before real-money go-live
+
+The gateway's pre-trade cash check is only as good as the ECC figures it is given, and every one of them defaults to a safe-but-inert value. Work through this list before pointing the gateway at a production EPEX account.
+
+| Set | To |
+| --- | --- |
+| House cash limit, **EUR** and **GBP** | The trading limit your Clearing Member has set for you in the ECC Member Area (`EPEX_CONTINUOUS_EUR` / `EPEX_CONTINUOUS_GBP`). Both pools, separately — they never net. Set via `PUT /api/v1/cash_limit` or the terminal's Limits page. |
+| `cash_limit.fail_closed` | `true`. ECC treats an unset limit as zero — "no exposure can be created" (RM R55 §3.11). This seeds the runtime switch on a fresh database only; on an existing install confirm the live value with `GET /api/v1/cash_fail_closed`. |
+| `cash_limit.gbp_sell_reservation_schedule` | ECC's current GB Price Independent Delivery Risk Parameter for Continuous Trading in M7 (sell only), from the ECC Risk Parameter File. Required for any GB trading — see the [config.yml guide](config_yml_dist.md). ECC revises it monthly, so this needs keeping up to date, not just setting once. |
+| Bank-holiday calendars, **both** currencies | The TARGET2 closing days for the year — New Year's Day, Good Friday, Easter Monday, 1 May, Christmas Day, 26 December — in the EUR *and* the GBP calendar. Both pools reset on ECC Business Days (RM R55 §3.11/§3.12). Set via `PUT /api/v1/holidays` or the terminal's Limits page; the gateway warns at startup when a calendar is empty or the two disagree. |
+| `cash_limit.exposure_window_timezone` | Leave it at `Europe/Amsterdam`. It is ECC's clearing timezone (CET/CEST), not a display preference — changing it moves the 16:00 booking cut away from ECC's and the gateway warns about it at startup. |
+
+> [!CAUTION]
+> **The gateway's check is a front-end risk check, not a substitute for the exchange's.** It is deliberately never looser than M7's, but a Trading Participant remains legally required to comply with its Trading Limit regardless of what any pre-trade layer accepts.
+
 ## Port topology
 
 A fully-enabled gateway listens on four ports. The proxy fronts each one.

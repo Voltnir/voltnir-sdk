@@ -1180,7 +1180,7 @@ Set the cash-limit fail-closed switch. Takes effect immediately for all subseque
 
 ### `GET` `/api/v1/holidays`
 
-Returns the ECC **bank-holiday calendars** used by the cash-limit exposure window, one list per settlement currency. The cash limit re-bases exposure at **16:00 (ECC timezone) each working day**; configured holidays extend the window across public holidays (a Monday holiday rolls the Friday window to Tuesday). **EUR and GBP keep independent calendars**: GB bank holidays close CHAPS, so the GBP window observes a different set than the EUR (ECC/TARGET2) window. Both pools share the same 16:00 reset; only the dates differ. Holidays are runtime-managed (no `config.yml` edit, no restart): a change is held in memory, persisted to the database, and reloaded on startup. Each entry carries an optional display `label` (ignored by the window math).
+Returns the ECC **bank-holiday calendars** used by the cash-limit exposure window, one list per settlement currency. The cash limit re-bases exposure at **16:00 (ECC timezone) on each ECC Business Day**; configured holidays extend the window across them (a Monday holiday rolls the Friday window to Tuesday). ECC Business Days are weekdays minus the **TARGET2 closing days**, and the GBP limit resets on the same days as the EUR limit (ECC Risk Management Services R55 §3.12), so **enter the same six TARGET2 dates in both calendars every year**: New Year's Day, Good Friday, Easter Monday, 1 May, Christmas Day and 26 December. Two calendars are kept only so an ad-hoc ECC closure affecting one pool, or a non-ECC deployment, can be expressed — a routine divergence between them is a configuration mistake and the gateway warns about it at startup. Holidays are runtime-managed (no `config.yml` edit, no restart): a change is held in memory, persisted to the database, and reloaded on startup. Each entry carries an optional display `label` (ignored by the window math).
 
 #### Response: 200 OK
 
@@ -1191,7 +1191,8 @@ Returns the ECC **bank-holiday calendars** used by the cash-limit exposure windo
     {"date": "2026-12-26", "label": null}
   ],
   "gbp": [
-    {"date": "2026-08-31", "label": "Summer Bank Holiday"}
+    {"date": "2026-12-25", "label": "Christmas Day"},
+    {"date": "2026-12-26", "label": null}
   ]
 }
 ```
@@ -1213,7 +1214,7 @@ Replaces one currency's whole calendar with the supplied list. Takes effect imme
 
 ```json
 {"currency": "gbp", "holidays": [
-  {"date": "2026-08-31", "label": "Summer Bank Holiday"},
+  {"date": "2026-05-01", "label": "Labour Day"},
   {"date": "2026-12-25"}
 ]}
 ```
